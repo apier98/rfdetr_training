@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rfdetr-training-workspace"
+version = "0.1.0"
+description = "CLI workspace to create datasets and train RF-DETR models."
+requires-python = ">=3.9"
+readme = "README.md"
+
+[project.scripts]
+rfdetrw = "rfdetr_training.cli:main"
+
+[tool.setuptools]
+packages = ["rfdetr_training"]
+

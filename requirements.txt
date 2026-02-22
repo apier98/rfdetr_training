@@ -1,0 +1,11 @@
+# Note: install PyTorch separately to match your CUDA setup:
+# https://pytorch.org/get-started/locally/
+
+rfdetr
+pillow
+
+# Optional (inference/visualization helpers in this repo)
+opencv-python
+supervision
+numpy
+

@@ -4,6 +4,10 @@ Purpose:
 - Centralize training for RF-DETR models (Nano/Small/Medium/Base) on user-provided datasets.
 - Organize every dataset and its related artifacts under a UUID directory. Models and checkpoints for a dataset are stored inside the same UUID folder.
 
+Preferred interface (CLI):
+- Use `python -m rfdetr_training ...` for the supported commands.
+- Scripts under `scripts/` still work, but they are thin wrappers around the CLI.
+
 Top-level conventions:
 - Each dataset gets its own UUID folder under `datasets/` (or another chosen root). Treat the UUID folder as the single source-of-truth for that dataset's images, annotations, models and exports.
 
@@ -48,13 +52,13 @@ Quick CLI conversion (repo helper):
 
 ```powershell
 # Basic conversion (writes _annotations.coco.json into coco/train and coco/valid)
-python .\scripts\yolo_to_coco.py -d .\datasets\<UUID> --train-ratio 0.8
+python -m rfdetr_training dataset yolo-to-coco -d .\datasets\<UUID> --train-ratio 0.8
 
 # Convert and copy images into the coco split folders
-python .\scripts\yolo_to_coco.py -d .\datasets\<UUID> --train-ratio 0.8 --copy-images
+python -m rfdetr_training dataset yolo-to-coco -d .\datasets\<UUID> --train-ratio 0.8 --copy-images
 
 # Run validation report only (checks unmatched images/labels and class-id coverage)
-python .\scripts\yolo_to_coco.py -d .\datasets\<UUID> --validate-only
+python -m rfdetr_training dataset yolo-to-coco -d .\datasets\<UUID> --validate-only
 ```
 
 Notes on the helper:
@@ -129,7 +133,7 @@ References and links:
 
 Recommended next steps (short):
 - Validate your dataset and generate COCO JSONs under `datasets/<UUID>/coco/`.
-- Run a short smoke training run (1-2 epochs) with `RFDETRNano` to confirm pipeline and GPU compatibility.
+- Run a short smoke training run (1-2 epochs) to confirm pipeline and GPU compatibility.
 - After a successful run, increase epochs and tune LR/batch sizes. Keep all checkpoints in `datasets/<UUID>/models/`.
 
 Contact / notes:
