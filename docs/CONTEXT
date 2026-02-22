@@ -1,0 +1,136 @@
+Project: RF-DETR training workspace
+
+Purpose:
+- Centralize training for RF-DETR models (Nano/Small/Medium/Base) on user-provided datasets.
+- Organize every dataset and its related artifacts under a UUID directory. Models and checkpoints for a dataset are stored inside the same UUID folder.
+
+Top-level conventions:
+- Each dataset gets its own UUID folder under `datasets/` (or another chosen root). Treat the UUID folder as the single source-of-truth for that dataset's images, annotations, models and exports.
+
+Suggested UUID folder layout (recommended):
+
+`datasets/<UUID>/`
+- `raw/` : original uploaded images and raw label files (YOLO, COCO, etc.)
+- `coco/` : COCO-format exports (train/, valid/, test/), each split contains `_annotations.coco.json` + images
+  - `coco/train/_annotations.coco.json`
+  - `coco/valid/_annotations.coco.json`
+  - `coco/test/_annotations.coco.json`
+- `yolo/` : (optional) YOLO-format files (if you keep a YOLO copy). Prefer converting to COCO for RF-DETR training.
+- `models/` : training outputs and checkpoints (model checkpoints, `checkpoint_best_total.pth`, exported ONNX, etc.)
+- `logs/` : TensorBoard logs, W&B metadata, training notes
+- `exports/` : ONNX, TorchScript, optimized artifacts for inference
+- `README.md` or `METADATA.json` : small manifest describing the dataset (class names, original source, license, notes)
+
+Why COCO? (RF-DETR requirement)
+- RF-DETR expects the dataset to be in COCO JSON format and split into `train`, `valid`, and `test` directories. Each split must include a `_annotations.coco.json` file plus the images for that split.
+- Example structure inside `datasets/<UUID>/coco/`:
+
+```
+dataset/
+├── train/
+│   ├── _annotations.coco.json
+│   ├── image1.jpg
+│   └── ...
+├── valid/
+│   ├── _annotations.coco.json
+│   └── ...
+└── test/
+    ├── _annotations.coco.json
+    └── ...
+```
+
+Converting YOLO -> COCO:
+- You can export/convert YOLO to COCO using Roboflow (roboflow.com/annotate) or community conversion scripts/tools (search for "yolo to coco converter"). Keep the original YOLO files in `yolo/` for traceability, but use the COCO copy for training.
+
+Quick CLI conversion (repo helper):
+- We provide a helper script `scripts/yolo_to_coco.py` that converts YOLO `.txt` labels (in `yolo/`) and images (from `raw/`) into COCO JSONs under `coco/train` and `coco/valid`.
+- Example usage (PowerShell):
+
+```powershell
+# Basic conversion (writes _annotations.coco.json into coco/train and coco/valid)
+python .\scripts\yolo_to_coco.py -d .\datasets\<UUID> --train-ratio 0.8
+
+# Convert and copy images into the coco split folders
+python .\scripts\yolo_to_coco.py -d .\datasets\<UUID> --train-ratio 0.8 --copy-images
+
+# Run validation report only (checks unmatched images/labels and class-id coverage)
+python .\scripts\yolo_to_coco.py -d .\datasets\<UUID> --validate-only
+```
+
+Notes on the helper:
+- The script reads `METADATA.json` `class_names` to assign category names. If `class_names` is empty, numeric YOLO ids are used as category ids and category names are left empty.
+- `--validate` prints a report then continues with conversion; `--validate-only` prints the report and exits without writing files.
+- The helper expects YOLO label files named like `img_0001.txt` with the same stem as the image `img_0001.jpg` present in `raw/`.
+
+Installation & environment (minimum):
+- Python >= 3.9
+- GPU + CUDA drivers recommended for training
+- Install RF-DETR package (recommended):
+
+`pip install rfdetr`
+
+- For ONNX export support:
+
+`pip install rfdetr[onnxexport]`
+
+Basic RF-DETR Nano fine-tune example (smallest model):
+
+- Use RF-DETR Nano for minimal compute and fastest experimentation. The RF-DETR Python package exposes model classes and a `.train()` API.
+
+Example (replace paths with your UUID folders):
+
+```python
+from rfdetr import RFDETRNano
+
+# instantiate the smallest model
+model = RFDETRNano()
+
+# train: point dataset_dir to the folder containing train/ valid/ test/ with COCO JSONs
+model.train(
+    dataset_dir=r"C:\path\to\datasets\<UUID>\coco",
+    epochs=20,
+    batch_size=4,
+    grad_accum_steps=4,
+    lr=1e-4,
+    output_dir=r"C:\path\to\datasets\<UUID>\models",
+    tensorboard=True
+)
+```
+
+Notes on batch sizing and memory:
+- Adjust `batch_size` and `grad_accum_steps` so the effective total batch size is appropriate (RF-DETR docs suggest a total of ~16 as an example). For example: `batch_size=4, grad_accum_steps=4` gives effective batch size 16.
+- On large GPUs you can use `batch_size=16, grad_accum_steps=1`.
+
+Checkpointing and model files:
+- Training saves checkpoints inside the `output_dir` you pass to `.train()`.
+- Typical checkpoint files:
+  - `checkpoint.pth` — most recent checkpoint
+  - `checkpoint_<number>.pth` — periodic checkpoints
+  - `checkpoint_best_ema.pth` — best EMA-based checkpoint
+  - `checkpoint_best_regular.pth` — best non-EMA checkpoint
+  - `checkpoint_best_total.pth` — final selected model weights for inference
+- Store `output_dir` inside the dataset UUID folder, e.g. `datasets/<UUID>/models/` to satisfy the project organization rule.
+
+Resuming training:
+- Pass a `resume` argument to `.train()` pointing at a `checkpoint.pth` to resume interrupted training.
+
+Early stopping, logging, and multi-GPU:
+- RF-DETR supports `early_stopping`, `tensorboard=True`, and `wandb=True` for logging.
+- For multi-GPU, use PyTorch DDP launcher (e.g. `python -m torch.distributed.launch --nproc_per_node=<N> main.py`). Adjust batch size accordingly.
+
+Exporting for inference:
+- After training you can export models to ONNX with `model.export()` (requires `rfdetr[onnxexport]`). Exported files will land in your `output_dir`.
+
+References and links:
+- GitHub repository: https://github.com/roboflow/rf-detr
+- Training docs: https://rfdetr.roboflow.com/learn/train/
+- RF-DETR Nano reference: https://rfdetr.roboflow.com/reference/nano/
+- Colab fine-tuning notebook: https://colab.research.google.com/github/roboflow-ai/notebooks/blob/main/notebooks/how-to-finetune-rf-detr-on-detection-dataset.ipynb
+
+Recommended next steps (short):
+- Validate your dataset and generate COCO JSONs under `datasets/<UUID>/coco/`.
+- Run a short smoke training run (1-2 epochs) with `RFDETRNano` to confirm pipeline and GPU compatibility.
+- After a successful run, increase epochs and tune LR/batch sizes. Keep all checkpoints in `datasets/<UUID>/models/`.
+
+Contact / notes:
+- This `CONTEXT` file is the canonical startup guide for the project. If you want, I can also add example conversion scripts (YOLO->COCO), a `train.py` wrapper that uses environment variables and your UUID layout, or a README generator for each dataset UUID.

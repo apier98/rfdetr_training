@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# Local datasets / experiment artifacts (repo is meant to be reusable)
+datasets/
+data/
+runs/
+outputs/
+exports/
+
+# Model checkpoints / weights (large binaries)
+*.pth
+*.pt
+*.onnx
+*.engine
+*.tflite
+*.mlpackage
+
+# Training artifacts / metrics / plots
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.avi
+
+# Cache
+.cache/
+wandb/
+lightning_logs/
+tensorboard/
+
+# Secrets
+.env
+.env.*
+
