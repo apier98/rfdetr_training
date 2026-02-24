@@ -8,6 +8,12 @@ This document explains how to move trained RF-DETR artifacts (models, metadata, 
 - Specify a small, stable JSON detection output format to use for saving or sending detection results.
 
 ## Files to transfer
+
+Recommended: create a portable bundle folder with an embedded inference runner:
+- `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --zip`
+- Copy the resulting `datasets/<UUID>/deploy/<bundle_name>/` folder (or the `.zip`) into the other project and run `python infer.py --image ...`.
+- For segmentation overlays, add `--out-image out.png` and optionally tune `--mask-thresh` / `--mask-alpha`.
+
 Copy the following from the dataset folder you trained into (example `datasets/<UUID>/`):
 - `models/checkpoint.pth` (or `best.pth`, `last.pth`) — the PyTorch checkpoint.
 - `METADATA.json` — contains `class_names` and other dataset metadata.

@@ -137,13 +137,19 @@ def _write_deployment_bundle(out_dir: Path, dataset_dir: Path, cfg: TrainConfig,
         }
         (out_dir / "model_config.json").write_text(json.dumps(model_config, indent=2), encoding="utf-8")
 
+        # Preprocess settings are part of the "portable contract" for deployment.
+        # Default policy is letterbox to preserve aspect ratio (matches typical operator UIs).
+        target = int(cfg.resolution) if cfg.resolution is not None else 640
         preprocess = {
             "format_version": 1,
+            "resize_policy": "letterbox",
+            "target_h": target,
+            "target_w": target,
             "input_color": "RGB",
             "input_layout": "NCHW",
             "input_dtype": "float32",
             "input_range": "0..1",
-            "note": "Matches the repo inference tools: PIL RGB -> torchvision.transforms.ToTensor().",
+            "note": "PIL RGB -> torchvision.transforms.ToTensor(); resize uses letterbox to preserve aspect ratio.",
         }
         (out_dir / "preprocess.json").write_text(json.dumps(preprocess, indent=2), encoding="utf-8")
 
@@ -151,6 +157,7 @@ def _write_deployment_bundle(out_dir: Path, dataset_dir: Path, cfg: TrainConfig,
             "format_version": 1,
             "score_threshold_default": 0.3,
             "mask_threshold_default": 0.5,
+            "mask_alpha_default": 0.45,
             "note": "Defaults used by scripts/infer_helpers.py parse_model_output().",
         }
         (out_dir / "postprocess.json").write_text(json.dumps(postprocess, indent=2), encoding="utf-8")

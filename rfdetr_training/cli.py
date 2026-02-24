@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import os
 from pathlib import Path
@@ -15,8 +16,10 @@ from .coco import (
 )
 from .coco_merge import merge_coco_into_split
 from .datasets import create_dataset, load_metadata, yolo_to_coco
+from .bundle import create_bundle
 from .export import export_onnx, export_tensorrt_from_onnx
 from .ingest import ingest_labels_inbox
+from .infer import infer_from_bundle
 from .train import TrainConfig, train
 
 
@@ -81,6 +84,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ex.add_argument("--fp16", action="store_true", help="TensorRT: build FP16 engine")
     ex.add_argument("--workspace-mb", type=int, default=2048, help="TensorRT: workspace size in MB")
+
+    # bundle
+    bd = sub.add_parser("bundle", help="Create a portable deployment bundle (checkpoint + configs + runner)")
+    bd.add_argument("--dataset-dir", "-d", required=True)
+    bd.add_argument("--weights", "-w", required=True, help="Checkpoint path (.pth)")
+    bd.add_argument("--task", choices=["detect", "seg"], default="detect")
+    bd.add_argument("--size", choices=["nano", "small", "base", "medium"], default="nano", help="Detection model size (ignored if using checkpoint model)")
+    bd.add_argument("--output-dir", "-o", default=None, help="Output bundle directory (default: datasets/<UUID>/deploy/<weights>_<timestamp>)")
+    bd.add_argument("--height", type=int, default=None, help="Model input height (default: trained resolution or 640)")
+    bd.add_argument("--width", type=int, default=None, help="Model input width (default: trained resolution or 640)")
+    bd.add_argument("--export", action="append", default=None, choices=["onnx", "tensorrt"], help="Optional: include exported formats (repeatable)")
+    bd.add_argument("--opset", type=int, default=17, help="ONNX opset")
+    bd.add_argument("--dynamic", action="store_true", help="ONNX: export dynamic H/W axes")
+    bd.add_argument("--device", default=None, help="Device for export (e.g. cuda:0, cpu)")
+    bd.add_argument("--use-checkpoint-model", action="store_true", help="If checkpoint contains a pickled model, use it (trusted only)")
+    bd.add_argument("--checkpoint-key", default=None, help="Explicit key inside checkpoint that contains state_dict")
+    bd.add_argument(
+        "--strict",
+        dest="strict",
+        action="store_true",
+        default=True,
+        help="Fail if checkpoint does not match model exactly (recommended for deployment). Default: enabled.",
+    )
+    bd.add_argument("--non-strict", dest="strict", action="store_false", help="Allow partial checkpoint loads (debugging only).")
+    bd.add_argument("--fp16", action="store_true", help="TensorRT: build FP16 engine")
+    bd.add_argument("--workspace-mb", type=int, default=2048, help="TensorRT: workspace size in MB")
+    bd.add_argument("--zip", action="store_true", help="Also write <bundle>.zip next to the bundle dir")
+    bd.add_argument("--overwrite", action="store_true", help="Overwrite output dir if it exists")
+
+    # infer (bundle)
+    inf = sub.add_parser("infer", help="Run inference using a deployment bundle directory (debug/smoke check)")
+    inf.add_argument("--bundle-dir", "-b", required=True)
+    inf.add_argument("--image", "-i", required=True)
+    inf.add_argument("--weights", "-w", default=None, help="Override weights path (default: <bundle>/checkpoint.pth)")
+    inf.add_argument("--device", default=None)
+    inf.add_argument("--threshold", type=float, default=None)
+    inf.add_argument("--mask-thresh", type=float, default=None)
+    inf.add_argument("--mask-alpha", type=float, default=None, help="Segmentation: mask overlay alpha (0..1)")
+    inf.add_argument("--use-checkpoint-model", action="store_true", help="If checkpoint contains a pickled model, use it (trusted only)")
+    inf.add_argument("--checkpoint-key", default=None)
+    inf.add_argument("--strict", action="store_true", default=False, help="Strict state_dict load (recommended for deployment bundles)")
+    inf.add_argument("--out-json", default=None)
+    inf.add_argument("--out-image", default=None, help="Optional: write an overlay image (boxes + masks if seg)")
 
     # dataset
     ds = sub.add_parser("dataset", help="Dataset utilities")
@@ -511,6 +557,7 @@ def main(argv: List[str] | None = None) -> int:
             dynamic=False,
             use_checkpoint_model=bool(args.use_checkpoint_model),
             checkpoint_key=args.checkpoint_key,
+            strict=bool(args.strict),
         )
         if not onnx_res.ok or onnx_res.output_path is None:
             print(f"Error: {onnx_res.message}", file=sys.stderr)
@@ -528,6 +575,116 @@ def main(argv: List[str] | None = None) -> int:
             print(f"Error: {trt_res.message}", file=sys.stderr)
             return 2
         print(trt_res.message)
+        return 0
+
+    if args.cmd == "bundle":
+        dataset_dir = Path(args.dataset_dir)
+        weights = Path(args.weights)
+        out_dir = Path(args.output_dir) if args.output_dir else None
+        exports = args.export or []
+        res = create_bundle(
+            dataset_dir=dataset_dir,
+            weights=weights,
+            task=args.task,
+            size=args.size,
+            output_dir=out_dir,
+            height=args.height,
+            width=args.width,
+            exports=exports,
+            device=args.device,
+            opset=int(args.opset),
+            dynamic_onnx=bool(args.dynamic),
+            use_checkpoint_model=bool(args.use_checkpoint_model),
+            checkpoint_key=args.checkpoint_key,
+            strict=bool(args.strict),
+            fp16=bool(args.fp16),
+            workspace_mb=int(args.workspace_mb),
+            make_zip=bool(args.zip),
+            overwrite=bool(args.overwrite),
+        )
+        if not res.ok:
+            print(f"Error: {res.message}", file=sys.stderr)
+            return 2
+        print(res.message)
+        return 0
+
+    if args.cmd == "infer":
+        bundle_dir = Path(args.bundle_dir)
+        image_path = Path(args.image)
+        weights = Path(args.weights) if args.weights else None
+        res = infer_from_bundle(
+            bundle_dir=bundle_dir,
+            image_path=image_path,
+            weights_path=weights,
+            device=args.device,
+            score_thresh=args.threshold,
+            mask_thresh=args.mask_thresh,
+            checkpoint_key=args.checkpoint_key,
+            use_checkpoint_model=bool(args.use_checkpoint_model),
+            strict=bool(args.strict),
+        )
+        if not res.ok or res.payload is None:
+            print(f"Error: {res.message}", file=sys.stderr)
+            return 2
+
+        if args.out_image:
+            try:
+                from PIL import Image, ImageDraw  # type: ignore
+            except Exception as e:
+                print(f"Warning: PIL not available; cannot write --out-image ({e})", file=sys.stderr)
+            else:
+                try:
+                    img = Image.open(str(image_path)).convert("RGB")
+
+                    # masks (best-effort; requires numpy for fast conversion)
+                    alpha = float(args.mask_alpha) if args.mask_alpha is not None else 0.45
+                    if res.masks:
+                        try:
+                            import numpy as np
+
+                            rgba = img.convert("RGBA")
+                            overlay = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
+                            w_img, h_img = rgba.size
+                            for i, m in enumerate(res.masks):
+                                if m is None:
+                                    continue
+                                mm = np.asarray(m)
+                                if mm.ndim != 2:
+                                    continue
+                                if mm.shape[0] != h_img or mm.shape[1] != w_img:
+                                    mi = Image.fromarray((mm.astype(np.uint8) * 255))
+                                    mi = mi.resize((w_img, h_img), resample=Image.NEAREST)
+                                    mm = (np.asarray(mi) > 127)
+                                r = (37 * (i + 1)) % 255
+                                g = (17 * (i + 1)) % 255
+                                b = (97 * (i + 1)) % 255
+                                mask_img = Image.fromarray((mm.astype(np.uint8) * int(round(alpha * 255))))
+                                overlay.paste((int(r), int(g), int(b), int(round(alpha * 255))), (0, 0), mask_img)
+                            img = Image.alpha_composite(rgba, overlay).convert("RGB")
+                        except Exception:
+                            pass
+
+                    draw = ImageDraw.Draw(img)
+                    if res.boxes and res.scores and res.labels:
+                        for b, sc, lab in zip(res.boxes, res.scores, res.labels):
+                            x1, y1, x2, y2 = [float(x) for x in b]
+                            draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
+                            draw.text((x1 + 2, max(0, y1 - 12)), f"{int(lab)}:{float(sc):.2f}", fill=(0, 255, 0))
+
+                    out_img = Path(args.out_image).expanduser().resolve()
+                    out_img.parent.mkdir(parents=True, exist_ok=True)
+                    img.save(str(out_img))
+                    print(f"Wrote: {out_img}")
+                except Exception as e:
+                    print(f"Warning: failed to write --out-image ({e})", file=sys.stderr)
+
+        if args.out_json:
+            outp = Path(args.out_json).expanduser().resolve()
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            outp.write_text(json.dumps(res.payload, indent=2), encoding="utf-8")
+            print(f"Wrote: {outp}")
+        else:
+            print(json.dumps(res.payload, indent=2))
         return 0
 
     print("Unknown command", file=sys.stderr)

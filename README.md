@@ -91,6 +91,16 @@ Export to ONNX:
 Build a TensorRT engine (requires TensorRT `trtexec` on PATH):
 - `python -m rfdetr_training export -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --format tensorrt --fp16`
 
+## Deployment Bundle (portable)
+
+After training, you can create a self-contained folder you can copy into another project. It includes:
+`checkpoint.pth`, `classes.json`, `model_config.json`, `preprocess.json` (letterbox / keep aspect ratio),
+`postprocess.json`, and a standalone `infer.py` runner.
+
+- `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --zip`
+- Run inside the bundle folder: `python infer.py --image path\\to\\image.jpg --out-json out.json --out-image out.png`
+- Segmentation: the bundle runner also supports `--mask-thresh` and `--mask-alpha` for mask overlays.
+
 ## Tools (optional)
 
 The `scripts/` folder also contains standalone utilities that are useful during dataset prep/debugging, but they are not required for training:
