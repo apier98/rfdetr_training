@@ -74,6 +74,9 @@ If you see duplicated class names / wrong `num_classes`, align COCO categories t
 Common training options:
 - Windows stability: add `--num-workers 0`
 - If you see the “Inference tensors cannot be saved for backward” error: add `--patch-inference-mode`
+- Fine-tune from a pretrained RF-DETR checkpoint: add `--pretrained`
+  - If `--pretrained` is set and `--pretrain-weights` is omitted, we let `rfdetr` apply its default pretrained weights behavior.
+  - If `--pretrained` is not set, we default to disabling pretrained downloads/loads for reproducibility.
 - Start a new run from weights: `--finetune-from path\to\checkpoint.pth`
 - Continue an existing run: `--resume path\to\checkpoint.pth`
 - Evaluation only (no training): add `--eval-only`
@@ -97,7 +100,11 @@ After training, you can create a self-contained folder you can copy into another
 `checkpoint.pth`, `classes.json`, `model_config.json`, `preprocess.json` (letterbox / keep aspect ratio),
 `postprocess.json`, and a standalone `infer.py` runner.
 
-- `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --zip`
+- Recommended: bundle the portable checkpoint (PyTorch 2.6+ friendly weights-only):
+  - `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_portable.pth --zip`
+- If you want to bundle a training checkpoint directly, the bundler will still write a weights-only `checkpoint.pth` by default:
+  - `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --zip`
+  - Optional: include the original checkpoint as `checkpoint_raw.pth` (trusted/debug only) with `--include-raw-checkpoint`.
 - Run inside the bundle folder: `python infer.py --image path\\to\\image.jpg --out-json out.json --out-image out.png`
 - Segmentation: the bundle runner also supports `--mask-thresh` and `--mask-alpha` for mask overlays.
 

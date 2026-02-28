@@ -464,17 +464,29 @@ def create_bundle(
     }
     _write_json(bundle_dir / "preprocess.json", preprocess)
 
+    # More conservative defaults for detect to avoid a wall of duplicate boxes.
+    if task_final == "detect":
+        score_thresh = 0.5
+        topk = 100
+        nms_iou = 0.3
+        max_dets = 50
+    else:
+        score_thresh = 0.3
+        topk = 300
+        nms_iou = 0.7
+        max_dets = 100
+
     postprocess = {
         "format_version": 1,
-        "score_threshold_default": 0.3,
+        "score_threshold_default": float(score_thresh),
         "mask_threshold_default": 0.5,
         "mask_alpha_default": 0.45,
-        "topk_default": 300,
-        "nms_iou_threshold_default": 0.7,
+        "topk_default": int(topk),
+        "nms_iou_threshold_default": float(nms_iou),
         "mask_nms_iou_threshold_default": 0.8,
-        "max_dets_default": 100,
+        "max_dets_default": int(max_dets),
         "min_box_size_default": 1.0,
-        "note": "Postprocess: decode DETR raw outputs (pred_logits/pred_boxes) using softmax (drop last no-object class) when logits have C+1 dims, otherwise sigmoid for C dims. Then filter degenerate boxes and apply optional NMS.",
+        "note": "Postprocess: decode DETR raw outputs (pred_logits/pred_boxes) using softmax (drop last no-object class) when logits have C+1 dims, otherwise sigmoid for 1-class logits. Then filter degenerate boxes and apply optional NMS.",
     }
     _write_json(bundle_dir / "postprocess.json", postprocess)
 

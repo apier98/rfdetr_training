@@ -208,6 +208,21 @@ def load_weights(
 def run_inference(model: Any, tensor: torch.Tensor):
     return model(tensor)
 
+def _call_predict_best_effort(predict_fn, image: Image.Image, *, threshold: float):
+    """Call a wrapper predict() with a best-effort threshold kwarg if supported."""
+    try:
+        import inspect as _inspect
+
+        sig = _inspect.signature(predict_fn)
+        params = sig.parameters
+        # common parameter names across wrappers
+        for name in ("threshold", "score_thresh", "score_threshold", "conf", "confidence"):
+            if name in params:
+                return predict_fn(image, **{name: float(threshold)})
+    except Exception:
+        pass
+    return predict_fn(image)
+
 
 def _filter_degenerate(
     boxes: List[List[float]],
@@ -244,10 +259,37 @@ def _apply_nms(
     if iou <= 0.0 or iou >= 1.0:
         return list(range(len(boxes)))
 
+    def _nms_fallback(boxes_t: torch.Tensor, scores_t: torch.Tensor, *, iou: float, max_keep: int) -> List[int]:
+        # Pure-torch NMS fallback (portable; slower than torchvision but OK for <= topk boxes).
+        x1 = boxes_t[:, 0]
+        y1 = boxes_t[:, 1]
+        x2 = boxes_t[:, 2]
+        y2 = boxes_t[:, 3]
+        areas = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+        order = torch.argsort(scores_t, descending=True)
+        keep: List[int] = []
+        mk = int(max_keep) if int(max_keep) > 0 else int(order.numel())
+        while order.numel() > 0 and len(keep) < mk:
+            i = int(order[0].item())
+            keep.append(i)
+            if order.numel() == 1:
+                break
+            rest = order[1:]
+            xx1 = torch.maximum(x1[i], x1[rest])
+            yy1 = torch.maximum(y1[i], y1[rest])
+            xx2 = torch.minimum(x2[i], x2[rest])
+            yy2 = torch.minimum(y2[i], y2[rest])
+            inter = (xx2 - xx1).clamp(min=0) * (yy2 - yy1).clamp(min=0)
+            union = areas[i] + areas[rest] - inter
+            iou_t = inter / union.clamp(min=1e-6)
+            order = rest[iou_t < float(iou)]
+        return keep
+
+    tv_nms = None
     try:
-        from torchvision.ops import nms as tv_nms
+        from torchvision.ops import nms as tv_nms  # type: ignore
     except Exception:
-        return list(range(len(boxes)))
+        tv_nms = None
 
     bt = torch.tensor(boxes, dtype=torch.float32)
     st = torch.tensor(scores, dtype=torch.float32)
@@ -259,8 +301,13 @@ def _apply_nms(
         idx = torch.nonzero(lt == cls_id, as_tuple=False).squeeze(1)
         if idx.numel() == 0:
             continue
-        keep_rel = tv_nms(bt[idx], st[idx], iou)
-        keep_all.extend(idx[keep_rel].tolist())
+        if tv_nms is not None:
+            keep_rel = tv_nms(bt[idx], st[idx], iou)
+            keep_all.extend(idx[keep_rel].tolist())
+        else:
+            kept_rel = _nms_fallback(bt[idx], st[idx], iou=iou, max_keep=max_dets)
+            if kept_rel:
+                keep_all.extend(idx[torch.tensor(kept_rel, dtype=torch.int64)].tolist())
 
     # Keep in descending score order.
     keep_all = sorted(keep_all, key=lambda i: float(scores[i]), reverse=True)
@@ -317,6 +364,55 @@ def parse_detections_and_masks(
     topk: int,
 ) -> Tuple[List[List[float]], List[float], List[int], Optional[torch.Tensor]]:
     """Return boxes_xyxy (model space), scores, labels, and optional masks (N,H,W) in model space."""
+    # supervision-like objects (rfdetr's high-level .predict often returns these)
+    try:
+        modname = out.__class__.__module__ if hasattr(out, "__class__") else ""
+    except Exception:
+        modname = ""
+    if modname.startswith("supervision") or "Detections" in getattr(out, "__class__", type(out)).__name__:
+        try:
+            b = None
+            if hasattr(out, "xyxy"):
+                b = np.asarray(getattr(out, "xyxy"))
+            s = None
+            for cand in ("confidence", "confidences", "scores", "score"):
+                if hasattr(out, cand):
+                    s = np.asarray(getattr(out, cand))
+                    break
+            l = None
+            for cand in ("class_id", "class_ids", "labels", "category_id", "class"):
+                if hasattr(out, cand):
+                    l = np.asarray(getattr(out, cand))
+                    break
+
+            boxes: List[List[float]] = []
+            scores: List[float] = []
+            labels: List[int] = []
+            if b is not None and getattr(b, "size", 0):
+                for i in range(int(b.shape[0])):
+                    sc = float(s[i]) if s is not None and i < len(s) else 1.0
+                    if sc < float(score_thresh):
+                        continue
+                    bb = [float(x) for x in b[i].tolist()]
+                    # Some outputs may be normalized 0..1.
+                    try:
+                        if max(bb) <= 1.5:
+                            bb = [
+                                bb[0] * float(model_w),
+                                bb[1] * float(model_h),
+                                bb[2] * float(model_w),
+                                bb[3] * float(model_h),
+                            ]
+                    except Exception:
+                        pass
+                    boxes.append(bb)
+                    scores.append(sc)
+                    labels.append(int(l[i]) if l is not None and i < len(l) else 0)
+            return boxes, scores, labels, None
+        except Exception:
+            # fall through to other formats
+            pass
+
     # decoded dict: boxes/scores/labels + optional masks
     if isinstance(out, dict) and "boxes" in out:
         b = out.get("boxes")
@@ -327,6 +423,12 @@ def parse_detections_and_masks(
             b = b.detach().cpu()
             if b.numel() == 0:
                 return [], [], [], None
+            # Heuristic: some wrappers return normalized boxes (0..1) even when they are already XYXY.
+            # If so, scale to model-space pixels.
+            try:
+                is_normalized = float(b.max().item()) <= 1.5 and float(b.min().item()) >= -0.25
+            except Exception:
+                is_normalized = False
             if s is None:
                 s = torch.ones((b.shape[0],))
             else:
@@ -345,7 +447,27 @@ def parse_detections_and_masks(
                 if sc < float(score_thresh):
                     continue
                 keep_idx.append(i)
-                boxes.append([float(x) for x in b[i].tolist()])
+                bb = [float(x) for x in b[i].tolist()]
+                if is_normalized and len(bb) == 4:
+                    x0, y0, x1, y1 = bb
+                    # If it already looks like XYXY, scale directly; otherwise treat as CXCYWH.
+                    looks_like_xyxy = (
+                        0.0 <= x0 <= 1.0
+                        and 0.0 <= y0 <= 1.0
+                        and 0.0 <= x1 <= 1.0
+                        and 0.0 <= y1 <= 1.0
+                        and x1 >= x0
+                        and y1 >= y0
+                    )
+                    if looks_like_xyxy:
+                        bb = [x0 * float(model_w), y0 * float(model_h), x1 * float(model_w), y1 * float(model_h)]
+                    else:
+                        cx = x0 * float(model_w)
+                        cy = y0 * float(model_h)
+                        bw = x1 * float(model_w)
+                        bh = y1 * float(model_h)
+                        bb = [cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0]
+                boxes.append(bb)
                 scores.append(sc)
                 labels.append(int(l[i].item()))
 
@@ -374,10 +496,17 @@ def parse_detections_and_masks(
             masks = masks[0]
         if not isinstance(logits, torch.Tensor) or not isinstance(boxes, torch.Tensor):
             return [], [], [], None
-        probs = torch.softmax(logits, dim=-1)
-        if probs.shape[-1] > 1:
-            probs = probs[..., :-1]
-        scores_t, labels_t = probs.max(dim=-1)
+        # Some models use a "no-object" class (softmax over C+1), while others emit
+        # per-class logits without a background (often sigmoid over C).
+        if int(logits.shape[-1]) == 1:
+            probs = torch.sigmoid(logits)
+            scores_t = probs[:, 0]
+            labels_t = torch.zeros((scores_t.shape[0],), dtype=torch.int64, device=scores_t.device)
+        else:
+            probs = torch.softmax(logits, dim=-1)
+            if probs.shape[-1] > 1:
+                probs = probs[..., :-1]
+            scores_t, labels_t = probs.max(dim=-1)
         keep = scores_t >= float(score_thresh)
         if not bool(keep.any()):
             return [], [], [], None
@@ -392,24 +521,47 @@ def parse_detections_and_masks(
         labels_k = labels_k[order]
         boxes_k = boxes_k[order]
 
+        # boxes are often cxcywh normalized (0..1), but some wrappers may return xyxy.
         normalized = float(boxes_k.max().item()) <= 1.5
         out_boxes: List[List[float]] = []
         out_scores: List[float] = []
         out_labels: List[int] = []
+        # Decide whether pred_boxes are xyxy or cxcywh using a simple raw-shape heuristic.
+        # For cxcywh, the 3rd/4th entries are widths/heights and are often < cx/cy,
+        # so many boxes would violate x2>=x1/y2>=y1 if interpreted as xyxy.
+        use_xyxy = False
+        try:
+            b0 = boxes_k.detach().cpu().float()
+            if b0.ndim == 2 and int(b0.shape[-1]) == 4 and int(b0.shape[0]) > 0:
+                ok = (b0[:, 2] >= b0[:, 0]) & (b0[:, 3] >= b0[:, 1])
+                ratio = float(ok.float().mean().item())
+                use_xyxy = ratio >= 0.70
+        except Exception:
+            use_xyxy = False
         for i in range(int(scores_k.shape[0])):
             sc = float(scores_k[i].item())
             lab = int(labels_k[i].item())
-            cx, cy, bw, bh = [float(x) for x in boxes_k[i].detach().cpu().tolist()]
-            if normalized:
-                cx *= float(model_w)
-                cy *= float(model_h)
-                bw *= float(model_w)
-                bh *= float(model_h)
-            x1 = cx - bw / 2.0
-            y1 = cy - bh / 2.0
-            x2 = cx + bw / 2.0
-            y2 = cy + bh / 2.0
-            out_boxes.append([x1, y1, x2, y2])
+            b = [float(x) for x in boxes_k[i].detach().cpu().tolist()]
+            if use_xyxy:
+                x1, y1, x2, y2 = b
+                if normalized:
+                    x1 *= float(model_w)
+                    x2 *= float(model_w)
+                    y1 *= float(model_h)
+                    y2 *= float(model_h)
+                out_boxes.append([x1, y1, x2, y2])
+            else:
+                cx, cy, bw, bh = b
+                if normalized:
+                    cx *= float(model_w)
+                    cy *= float(model_h)
+                    bw *= float(model_w)
+                    bh *= float(model_h)
+                x1 = cx - bw / 2.0
+                y1 = cy - bh / 2.0
+                x2 = cx + bw / 2.0
+                y2 = cy + bh / 2.0
+                out_boxes.append([x1, y1, x2, y2])
             out_scores.append(sc)
             out_labels.append(lab)
 
@@ -496,6 +648,16 @@ def main() -> int:
     if not weights_path.exists():
         raise SystemExit(f"Weights not found: {weights_path}")
 
+    # thresholds / postprocess config (also used for wrapper predict())
+    thresh = float(args.threshold) if args.threshold is not None else float(post_cfg.get("score_threshold_default", 0.3))
+    mask_thresh = float(args.mask_thresh) if args.mask_thresh is not None else float(post_cfg.get("mask_threshold_default", 0.5))
+    mask_alpha = float(args.mask_alpha) if args.mask_alpha is not None else float(post_cfg.get("mask_alpha_default", 0.45))
+    topk = int(args.topk) if args.topk is not None else int(post_cfg.get("topk_default", 300))
+    nms_iou = float(args.nms_iou) if args.nms_iou is not None else float(post_cfg.get("nms_iou_threshold_default", 0.7))
+    mask_nms_iou = float(args.mask_nms_iou) if args.mask_nms_iou is not None else float(post_cfg.get("mask_nms_iou_threshold_default", 0.8))
+    max_dets = int(args.max_dets) if args.max_dets is not None else int(post_cfg.get("max_dets_default", 100))
+    min_box_size = float(args.min_box_size) if args.min_box_size is not None else float(post_cfg.get("min_box_size_default", 1.0))
+
     model_obj = instantiate_model(task=task, size=size, num_classes=num_classes)
     model_obj = load_weights(
         model_obj,
@@ -531,30 +693,61 @@ def main() -> int:
             tw, th = int(adj_tw), int(adj_th)
 
     orig = Image.open(args.image).convert("RGB")
-    if policy == "letterbox":
-        pil_in, lb = letterbox(orig, tw, th)
+
+    # Prefer wrapper-level predict() for detection when available (more likely to match upstream
+    # preprocessing/postprocessing). For segmentation, many rfdetr versions either do not return
+    # masks from predict() by default or require additional flags; use the raw-tensor path so we
+    # can reliably decode `pred_masks` when present.
+    out = None
+    wrapper_used = False
+    try:
+        pred = getattr(model_obj, "predict", None)
+        if task == "detect" and callable(pred):
+            with torch.inference_mode():
+                out = _call_predict_best_effort(pred, orig, threshold=float(thresh))
+            wrapper_used = True
+    except Exception:
+        out = None
+        wrapper_used = False
+
+    if out is None:
+        if policy == "letterbox":
+            pil_in, lb = letterbox(orig, tw, th)
+        else:
+            pil_in = orig.resize((tw, th), resample=Image.BILINEAR)
+            lb = {
+                "orig_w": int(orig.width),
+                "orig_h": int(orig.height),
+                "pad_left": 0,
+                "pad_top": 0,
+                "scale": float(tw) / float(orig.width),
+                "target_w": tw,
+                "target_h": th,
+                "new_w": tw,
+                "new_h": th,
+            }
+
+        t = T.ToTensor()(pil_in).unsqueeze(0).to(device)
+        with torch.inference_mode():
+            out = run_inference(model, t)
     else:
-        pil_in = orig.resize((tw, th), resample=Image.BILINEAR)
-        lb = {"orig_w": int(orig.width), "orig_h": int(orig.height), "pad_left": 0, "pad_top": 0, "scale": float(tw) / float(orig.width), "target_w": tw, "target_h": th, "new_w": tw, "new_h": th}
-
-    t = T.ToTensor()(pil_in).unsqueeze(0).to(device)
-
-    with torch.inference_mode():
-        out = run_inference(model, t)
-
-    thresh = float(args.threshold) if args.threshold is not None else float(post_cfg.get("score_threshold_default", 0.3))
-    mask_thresh = float(args.mask_thresh) if args.mask_thresh is not None else float(post_cfg.get("mask_threshold_default", 0.5))
-    mask_alpha = float(args.mask_alpha) if args.mask_alpha is not None else float(post_cfg.get("mask_alpha_default", 0.45))
-    topk = int(args.topk) if args.topk is not None else int(post_cfg.get("topk_default", 300))
-    nms_iou = float(args.nms_iou) if args.nms_iou is not None else float(post_cfg.get("nms_iou_threshold_default", 0.7))
-    mask_nms_iou = float(args.mask_nms_iou) if args.mask_nms_iou is not None else float(post_cfg.get("mask_nms_iou_threshold_default", 0.8))
-    max_dets = int(args.max_dets) if args.max_dets is not None else int(post_cfg.get("max_dets_default", 100))
-    min_box_size = float(args.min_box_size) if args.min_box_size is not None else float(post_cfg.get("min_box_size_default", 1.0))
+        # identity mapping for wrapper outputs (already in original image coordinates)
+        lb = {
+            "orig_w": int(orig.width),
+            "orig_h": int(orig.height),
+            "pad_left": 0,
+            "pad_top": 0,
+            "scale": 1.0,
+            "target_w": int(orig.width),
+            "target_h": int(orig.height),
+            "new_w": int(orig.width),
+            "new_h": int(orig.height),
+        }
 
     boxes, scores, labels, masks_t = parse_detections_and_masks(
         out,
-        model_w=int(tw),
-        model_h=int(th),
+        model_w=(int(orig.width) if wrapper_used else int(tw)),
+        model_h=(int(orig.height) if wrapper_used else int(th)),
         score_thresh=float(thresh),
         mask_thresh=float(mask_thresh),
         topk=int(topk),
@@ -587,8 +780,8 @@ def main() -> int:
             ):
                 masks_t = masks_t[keep2]
 
-    # Optional: further suppress near-duplicate masks for seg.
-    if task == "seg" and isinstance(masks_t, torch.Tensor) and masks_t.ndim == 3 and boxes:
+    # Optional: further suppress near-duplicate masks for seg (raw-tensor path only).
+    if (not wrapper_used) and task == "seg" and isinstance(masks_t, torch.Tensor) and masks_t.ndim == 3 and boxes:
         try:
             masks_bin = (masks_t >= float(mask_thresh))
             keepm = _apply_mask_nms(masks_bin, scores, iou_thresh=float(mask_nms_iou), max_dets=int(max_dets))
@@ -600,7 +793,7 @@ def main() -> int:
                     masks_t = masks_t[keepm]
         except Exception:
             pass
-    mapped_boxes = [unletterbox_xyxy(b, lb) for b in boxes]
+    mapped_boxes = boxes if wrapper_used else [unletterbox_xyxy(b, lb) for b in boxes]
 
     dets: List[Dict[str, Any]] = []
     for b, s, l in zip(mapped_boxes, scores, labels):

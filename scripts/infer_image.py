@@ -25,6 +25,21 @@ from infer_helpers import instantiate_model, load_checkpoint_weights, parse_mode
 from infer_webcam import run_inference
 
 
+def _call_predict_best_effort(predict_fn, image: Image.Image, *, threshold: float):
+    """Call a wrapper predict() with a best-effort threshold kwarg if supported."""
+    try:
+        import inspect as _inspect
+
+        sig = _inspect.signature(predict_fn)
+        params = sig.parameters
+        for name in ("threshold", "score_thresh", "score_threshold", "conf", "confidence"):
+            if name in params:
+                return predict_fn(image, **{name: float(threshold)})
+    except Exception:
+        pass
+    return predict_fn(image)
+
+
 def load_class_names(path: Optional[str]) -> List[str]:
     if not path:
         return []
@@ -212,15 +227,24 @@ def main():
         except Exception:
             pass
 
-    # inference via shared helper to support wrapper objects
+    # Prefer wrapper-level predict() if present (often includes correct preprocessing/postprocessing).
     out = None
     try:
-        with torch.no_grad():
-            out = run_inference(model, module_for_torch, tensor)
-    except Exception as e:
-        if args.verbose:
-            print(f"Inference failed: {e}")
+        pred = getattr(model, "predict", None)
+        if callable(pred):
+            out = _call_predict_best_effort(pred, pil, threshold=float(args.threshold))
+    except Exception:
         out = None
+
+    # fallback: inference via shared helper to support wrapper objects
+    if out is None:
+        try:
+            with torch.no_grad():
+                out = run_inference(model, module_for_torch, tensor)
+        except Exception as e:
+            if args.verbose:
+                print(f"Inference failed: {e}")
+            out = None
 
     # debug: print a summary of raw model output when verbose
     if args.verbose:

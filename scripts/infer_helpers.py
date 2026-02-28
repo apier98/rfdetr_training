@@ -40,34 +40,30 @@ def instantiate_model(size: str, num_classes: Optional[int] = None, task: str = 
     except Exception:
         raise RuntimeError("Failed to import rfdetr. Install it with `pip install rfdetr` and ensure it's importable.")
 
+    def _ctor(cls):
+        # Many rfdetr versions will download/load pretrained weights if pretrain_weights is omitted.
+        # Pass pretrain_weights=None as best-effort to keep deployment/debug inference deterministic.
+        kwargs = {"pretrain_weights": None}
+        if num_classes is not None:
+            kwargs["num_classes"] = int(num_classes)
+        try:
+            return cls(**kwargs)
+        except TypeError:
+            # older versions may not accept pretrain_weights and/or num_classes
+            try:
+                kwargs.pop("pretrain_weights", None)
+                return cls(**kwargs)
+            except TypeError:
+                return cls()
+
     if size == "nano":
-        if num_classes is not None:
-            try:
-                return RFDETRNano(num_classes=num_classes)
-            except TypeError:
-                return RFDETRNano()
-        return RFDETRNano()
+        return _ctor(RFDETRNano)
     if size == "small":
-        if num_classes is not None:
-            try:
-                return RFDETRSmall(num_classes=num_classes)
-            except TypeError:
-                return RFDETRSmall()
-        return RFDETRSmall()
+        return _ctor(RFDETRSmall)
     if size == "base":
-        if num_classes is not None:
-            try:
-                return RFDETRBase(num_classes=num_classes)
-            except TypeError:
-                return RFDETRBase()
-        return RFDETRBase()
+        return _ctor(RFDETRBase)
     if size == "medium":
-        if num_classes is not None:
-            try:
-                return RFDETRMedium(num_classes=num_classes)
-            except TypeError:
-                return RFDETRMedium()
-        return RFDETRMedium()
+        return _ctor(RFDETRMedium)
     raise ValueError(f"Unknown model size: {size}")
 
 

@@ -330,8 +330,27 @@ def train(cfg: TrainConfig) -> int:
 
     # instantiate model
     try:
+        # Pretraining behavior:
+        # - If --pretrained is set and --pretrain-weights is not provided, allow rfdetr's default
+        #   behavior (often downloads/loads a matching pretrained checkpoint) by *omitting*
+        #   the pretrain_weights kwarg.
+        # - Otherwise (default), disable downloads for reproducibility.
+        if cfg.pretrain_weights:
+            pretrain_weights = cfg.pretrain_weights
+            force_kwarg = True
+        elif cfg.pretrained:
+            pretrain_weights = None
+            force_kwarg = False
+        else:
+            pretrain_weights = None
+            force_kwarg = True
+
         model, cls_name, size_applied = instantiate_rfdetr_model(
-            cfg.task, cfg.size, num_classes=num_classes, pretrain_weights=cfg.pretrain_weights
+            cfg.task,
+            cfg.size,
+            num_classes=num_classes,
+            pretrain_weights=pretrain_weights,
+            force_pretrain_weights_kwarg=force_kwarg,
         )
         if cfg.task.lower().strip() == "seg" and not size_applied:
             print(f"Note: --size {cfg.size!r} not applied for segmentation; using {cls_name}.")
