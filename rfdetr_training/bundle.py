@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .datasets import load_metadata
 from .export import export_onnx, export_tensorrt_from_onnx
 from .model_factory import instantiate_rfdetr_model
+from .torch_compat import infer_backbone_patch_size, unwrap_torch_module
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,28 @@ def _write_json(path: Path, obj: Dict[str, Any]) -> None:
 def _default_bundle_dir(dataset_dir: Path, *, weights: Path) -> Path:
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
     return dataset_dir / "deploy" / f"{_safe_name(weights.stem)}_{stamp}"
+
+
+def _normalize_runtime_size_for_model(*, task: str, size: str, num_classes: Optional[int], height: int, width: int) -> Tuple[int, int]:
+    try:
+        model, _, _ = instantiate_rfdetr_model(task, size, num_classes=num_classes, pretrain_weights=None)
+        module = unwrap_torch_module(model)
+        patch_size = infer_backbone_patch_size(module)
+    except Exception:
+        return int(height), int(width)
+
+    if not patch_size:
+        return int(height), int(width)
+
+    h = int(height)
+    w = int(width)
+    adj_h = h - (h % int(patch_size))
+    adj_w = w - (w % int(patch_size))
+    if adj_h <= 0 or adj_w <= 0:
+        return h, w
+    if adj_h != h or adj_w != w:
+        print(f"Note: adjusting bundle runtime size from {h}x{w} to {adj_h}x{adj_w} to satisfy patch_size={patch_size}.")
+    return adj_h, adj_w
 
 
 def _package_version(dist_name: str) -> Optional[str]:
@@ -499,6 +522,13 @@ def create_bundle(
     # Resolve task/size: prefer explicit CLI args; otherwise use training metadata.
     task_final = str((task or trained_model_cfg.get("task") or "detect")).strip().lower()
     size_final = str((size or trained_model_cfg.get("size") or "nano")).strip().lower()
+    h, w = _normalize_runtime_size_for_model(
+        task=task_final,
+        size=size_final,
+        num_classes=(int(len(class_names)) if class_names else None),
+        height=int(h),
+        width=int(w),
+    )
     runtime_versions = _bundle_runtime_versions()
 
     # Write configs at bundle root.

@@ -37,6 +37,18 @@ def _unwrap_for_inference(model: object):
     return unwrap_torch_module(model)
 
 
+def _adjust_dims_to_patch_size(*, target_h: int, target_w: int, patch_size: Optional[int]) -> tuple[int, int]:
+    if not patch_size:
+        return int(target_h), int(target_w)
+    h = int(target_h)
+    w = int(target_w)
+    adj_h = h - (h % int(patch_size))
+    adj_w = w - (w % int(patch_size))
+    if adj_h <= 0 or adj_w <= 0:
+        return h, w
+    return adj_h, adj_w
+
+
 def _run_onnx_inference(
     *,
     bundle_dir: Path,
@@ -81,6 +93,21 @@ def _run_onnx_inference(
     target_w = int(pre_cfg.get("target_w") or 640)
     target_h = int(pre_cfg.get("target_h") or 640)
 
+    inputs = session.get_inputs()
+    if not inputs:
+        return InferResult(False, None, "ONNX model has no inputs")
+    try:
+        input_shape = inputs[0].shape
+        if len(input_shape) >= 4:
+            h_dim = input_shape[2]
+            w_dim = input_shape[3]
+            if isinstance(h_dim, int) and h_dim > 0:
+                target_h = int(h_dim)
+            if isinstance(w_dim, int) and w_dim > 0:
+                target_w = int(w_dim)
+    except Exception:
+        pass
+
     lb = None
     if policy == "letterbox":
         pil_in, lb = letterbox_pil(pil, target_w=target_w, target_h=target_h)
@@ -89,10 +116,6 @@ def _run_onnx_inference(
 
     arr = np.asarray(pil_in, dtype=np.float32) / 255.0
     arr = np.transpose(arr, (2, 0, 1))[None, ...]
-
-    inputs = session.get_inputs()
-    if not inputs:
-        return InferResult(False, None, "ONNX model has no inputs")
 
     try:
         output_names = [out.name for out in session.get_outputs()]
@@ -187,6 +210,8 @@ def _run_pytorch_inference(
     except Exception as e:
         return InferResult(False, None, f"Failed to locate torch module inside model: {e}")
 
+    from .torch_compat import infer_backbone_patch_size
+
     from .checkpoints import load_checkpoint_weights
 
     lr = load_checkpoint_weights(
@@ -223,6 +248,8 @@ def _run_pytorch_inference(
     policy = str(pre_cfg.get("resize_policy") or "letterbox").strip().lower()
     target_w = int(pre_cfg.get("target_w") or 640)
     target_h = int(pre_cfg.get("target_h") or 640)
+    patch_size = infer_backbone_patch_size(module)
+    target_h, target_w = _adjust_dims_to_patch_size(target_h=target_h, target_w=target_w, patch_size=patch_size)
 
     lb = None
     if policy == "letterbox":

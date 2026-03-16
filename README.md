@@ -89,6 +89,7 @@ Common training options:
 
 Export to ONNX:
 - `python -m rfdetr_training export -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --format onnx`
+- `export` auto-detects `--task` and `--size` from `datasets/<UUID>/models/model_config.json` when available, so trained `seg` checkpoints export without restating the architecture.
 - Tip: export is `--strict` by default (fails fast on mismatched checkpoints). Use `--non-strict` only for debugging.
 
 Build a TensorRT engine (requires TensorRT `trtexec` on PATH):

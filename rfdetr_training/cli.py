@@ -69,6 +69,17 @@ def _load_jsonish(path: str) -> dict:
     raise ValueError(f"Could not parse config as JSON (or YAML): {p}")
 
 
+def _load_trained_model_config(dataset_dir: Path) -> dict:
+    p = dataset_dir.expanduser().resolve() / "models" / "model_config.json"
+    if not p.exists():
+        return {}
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rfdetrw", description="RF-DETR training workspace (CLI)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -80,12 +91,17 @@ def build_parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("export", help="Export a trained model for deployment (ONNX / TensorRT)")
     ex.add_argument("--dataset-dir", "-d", required=True)
     ex.add_argument("--weights", "-w", required=True, help="Checkpoint path (.pth)")
-    ex.add_argument("--task", choices=["detect", "seg"], default="detect")
+    ex.add_argument(
+        "--task",
+        choices=["detect", "seg"],
+        default=None,
+        help="Task for export. Default: auto (from datasets/<UUID>/models/model_config.json).",
+    )
     ex.add_argument(
         "--size",
         choices=["nano", "small", "base", "medium", "large", "xlarge", "2xlarge"],
-        default="nano",
-        help="Model size preset (some sizes may require rfdetr[plus]; ignored if using checkpoint model)",
+        default=None,
+        help="Model size preset. Default: auto (from datasets/<UUID>/models/model_config.json). Ignored if using checkpoint model.",
     )
     ex.add_argument("--format", choices=["onnx", "tensorrt"], default="onnx")
     ex.add_argument("--output", "-o", default=None, help="Output path (.onnx or .engine). Default: datasets/<UUID>/exports/")
@@ -702,13 +718,16 @@ def main(argv: List[str] | None = None) -> int:
         dataset_dir = Path(args.dataset_dir)
         weights = Path(args.weights)
         out = Path(args.output) if args.output else None
+        trained_model_cfg = _load_trained_model_config(dataset_dir)
+        task = str(args.task or trained_model_cfg.get("task") or "detect").strip().lower()
+        size = str(args.size or trained_model_cfg.get("size") or "nano").strip().lower()
 
         if args.format == "onnx":
             res = export_onnx(
                 dataset_dir=dataset_dir,
                 weights=weights,
-                task=args.task,
-                size=args.size,
+                task=task,
+                size=size,
                 output=out,
                 device=args.device,
                 height=int(args.height),
@@ -739,8 +758,8 @@ def main(argv: List[str] | None = None) -> int:
         onnx_res = export_onnx(
             dataset_dir=dataset_dir,
             weights=weights,
-            task=args.task,
-            size=args.size,
+            task=task,
+            size=size,
             output=tmp_onnx,
             device=args.device,
             height=int(args.height),
