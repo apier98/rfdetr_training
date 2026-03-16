@@ -42,6 +42,19 @@ def load_bundle_config(bundle_dir: Path) -> Dict[str, Any]:
     return out
 
 
+def _sigmoid_stable(x):
+    import numpy as np
+
+    x = np.asarray(x)
+    pos = x >= 0
+    neg = ~pos
+    out = np.empty_like(x, dtype=np.float32 if np.issubdtype(x.dtype, np.floating) else np.float32)
+    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
+    exp_x = np.exp(x[neg])
+    out[neg] = exp_x / (1.0 + exp_x)
+    return out
+
+
 def letterbox_pil(pil, *, target_w: int, target_h: int, fill: Tuple[int, int, int] = (114, 114, 114)) -> Tuple[Any, Letterbox]:
     """Resize to fit inside (target_w,target_h) and pad (keep aspect ratio)."""
     from PIL import Image  # type: ignore
@@ -208,7 +221,7 @@ def parse_model_output_detr(
     # Some models use a "no-object" class (softmax over C+1), while others emit
     # per-class logits without a background (often sigmoid over C).
     if int(logits0.shape[-1]) == 1:
-        probs = 1.0 / (1.0 + np.exp(-logits0))
+        probs = _sigmoid_stable(logits0)
         scores_t = probs[:, 0]
         labels_t = np.zeros((scores_t.shape[0],), dtype=np.int64)
     else:
@@ -269,7 +282,7 @@ def parse_model_output_detr(
             if m0.ndim == 3:
                 m0 = m0[idx][order]
                 if np.issubdtype(m0.dtype, np.floating):
-                    m0 = 1.0 / (1.0 + np.exp(-m0))
+                    m0 = _sigmoid_stable(m0)
                 out_masks = []
                 for j in range(int(m0.shape[0])):
                     out_masks.append(np.asarray(m0[j]) >= float(mask_thresh))

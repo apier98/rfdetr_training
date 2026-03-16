@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     inf.add_argument("--bundle-dir", "-b", required=True)
     inf.add_argument("--image", "-i", required=True)
     inf.add_argument("--weights", "-w", default=None, help="Override fallback checkpoint path (default: <bundle>/checkpoint.pth)")
-    inf.add_argument("--backend", choices=["auto", "onnx", "pytorch"], default="auto", help="Inference backend. Default: auto (prefer ONNX)")
+    inf.add_argument("--backend", choices=["auto", "tensorrt", "onnx", "pytorch"], default="auto", help="Inference backend. Default: auto (prefer TensorRT, then ONNX)")
     inf.add_argument("--device", default=None)
     inf.add_argument("--threshold", type=float, default=None)
     inf.add_argument("--mask-thresh", type=float, default=None)

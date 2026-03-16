@@ -49,6 +49,206 @@ def _adjust_dims_to_patch_size(*, target_h: int, target_w: int, patch_size: Opti
     return adj_h, adj_w
 
 
+def _run_tensorrt_inference(
+    *,
+    bundle_dir: Path,
+    image_path: Path,
+    pre_cfg: Dict[str, Any],
+    post_cfg: Dict[str, Any],
+    class_names: List[str],
+    score_thresh: Optional[float],
+    mask_thresh: Optional[float],
+    topk: int,
+) -> InferResult:
+    try:
+        import numpy as np
+        import tensorrt as trt  # type: ignore
+        import pycuda.autoinit  # type: ignore  # noqa: F401
+        import pycuda.driver as cuda  # type: ignore
+        from PIL import Image  # type: ignore
+    except Exception as e:
+        return InferResult(False, None, f"TensorRT runtime not available: {e}")
+
+    engine_path = bundle_dir / "model.engine"
+    if not engine_path.exists():
+        return InferResult(False, None, f"TensorRT engine not found: {engine_path}")
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    try:
+        runtime = trt.Runtime(logger)
+        engine = runtime.deserialize_cuda_engine(engine_path.read_bytes())
+    except Exception as e:
+        return InferResult(False, None, f"Failed to load TensorRT engine: {e}")
+    if engine is None:
+        return InferResult(False, None, f"Failed to deserialize TensorRT engine: {engine_path}")
+
+    try:
+        context = engine.create_execution_context()
+    except Exception as e:
+        return InferResult(False, None, f"Failed to create TensorRT execution context: {e}")
+    if context is None:
+        return InferResult(False, None, "TensorRT execution context is null")
+
+    use_tensor_api = hasattr(engine, "num_io_tensors") and hasattr(context, "set_tensor_address")
+    tensor_meta: List[Dict[str, Any]] = []
+    try:
+        if use_tensor_api:
+            count = int(engine.num_io_tensors)
+            for idx in range(count):
+                name = str(engine.get_tensor_name(idx))
+                mode = engine.get_tensor_mode(name)
+                tensor_meta.append(
+                    {
+                        "index": idx,
+                        "name": name,
+                        "is_input": bool(mode == trt.TensorIOMode.INPUT),
+                        "dtype": np.dtype(trt.nptype(engine.get_tensor_dtype(name))),
+                        "shape": tuple(int(v) for v in engine.get_tensor_shape(name)),
+                    }
+                )
+        else:
+            count = int(engine.num_bindings)
+            for idx in range(count):
+                tensor_meta.append(
+                    {
+                        "index": idx,
+                        "name": str(engine.get_binding_name(idx)),
+                        "is_input": bool(engine.binding_is_input(idx)),
+                        "dtype": np.dtype(trt.nptype(engine.get_binding_dtype(idx))),
+                        "shape": tuple(int(v) for v in engine.get_binding_shape(idx)),
+                    }
+                )
+    except Exception as e:
+        return InferResult(False, None, f"Failed to inspect TensorRT engine bindings: {e}")
+
+    inputs_meta = [m for m in tensor_meta if m["is_input"]]
+    outputs_meta = [m for m in tensor_meta if not m["is_input"]]
+    if not inputs_meta:
+        return InferResult(False, None, "TensorRT engine has no inputs")
+    if not outputs_meta:
+        return InferResult(False, None, "TensorRT engine has no outputs")
+
+    input_meta = inputs_meta[0]
+    policy = str(pre_cfg.get("resize_policy") or "letterbox").strip().lower()
+    target_w = int(pre_cfg.get("target_w") or 640)
+    target_h = int(pre_cfg.get("target_h") or 640)
+    input_shape = tuple(int(v) for v in input_meta["shape"])
+    if len(input_shape) >= 4:
+        if input_shape[2] > 0:
+            target_h = int(input_shape[2])
+        if input_shape[3] > 0:
+            target_w = int(input_shape[3])
+
+    try:
+        desired_shape = (1, 3, int(target_h), int(target_w))
+        if any(v <= 0 for v in input_shape):
+            if use_tensor_api and hasattr(context, "set_input_shape"):
+                context.set_input_shape(str(input_meta["name"]), desired_shape)
+            elif hasattr(context, "set_binding_shape"):
+                context.set_binding_shape(int(input_meta["index"]), desired_shape)
+    except Exception as e:
+        return InferResult(False, None, f"Failed to configure TensorRT input shape: {e}")
+
+    pil = Image.open(str(image_path)).convert("RGB")
+    orig_w, orig_h = int(pil.width), int(pil.height)
+    lb = None
+    if policy == "letterbox":
+        pil_in, lb = letterbox_pil(pil, target_w=target_w, target_h=target_h)
+    else:
+        pil_in = pil.resize((target_w, target_h))
+
+    arr = np.asarray(pil_in, dtype=np.float32) / 255.0
+    arr = np.transpose(arr, (2, 0, 1))[None, ...]
+    arr = np.ascontiguousarray(arr.astype(input_meta["dtype"], copy=False))
+
+    host_buffers: Dict[str, Any] = {}
+    device_buffers: Dict[str, Any] = {}
+    stream = cuda.Stream()
+    bindings: List[int] = [0] * len(tensor_meta)
+
+    try:
+        for meta in tensor_meta:
+            name = str(meta["name"])
+            idx = int(meta["index"])
+            if meta["is_input"]:
+                host = arr
+            else:
+                if use_tensor_api and hasattr(context, "get_tensor_shape"):
+                    shape = tuple(int(v) for v in context.get_tensor_shape(name))
+                else:
+                    shape = tuple(int(v) for v in context.get_binding_shape(idx))
+                if any(v < 0 for v in shape):
+                    return InferResult(False, None, f"TensorRT output shape unresolved for {name}: {shape}")
+                host = np.empty(shape, dtype=meta["dtype"])
+            host = np.ascontiguousarray(host)
+            device_mem = cuda.mem_alloc(int(host.nbytes))
+            host_buffers[name] = host
+            device_buffers[name] = device_mem
+            bindings[idx] = int(device_mem)
+            if meta["is_input"]:
+                cuda.memcpy_htod_async(device_mem, host, stream)
+            if use_tensor_api:
+                context.set_tensor_address(name, int(device_mem))
+    except Exception as e:
+        return InferResult(False, None, f"Failed to allocate TensorRT buffers: {e}")
+
+    try:
+        if use_tensor_api and hasattr(context, "execute_async_v3"):
+            ok = bool(context.execute_async_v3(stream.handle))
+        elif hasattr(context, "execute_async_v2"):
+            ok = bool(context.execute_async_v2(bindings=bindings, stream_handle=stream.handle))
+        elif hasattr(context, "execute_v2"):
+            ok = bool(context.execute_v2(bindings=bindings))
+        else:
+            return InferResult(False, None, "TensorRT execution API not supported by this runtime")
+    except Exception as e:
+        return InferResult(False, None, f"TensorRT inference failed: {e}")
+    if not ok:
+        return InferResult(False, None, "TensorRT inference returned failure status")
+
+    try:
+        for meta in outputs_meta:
+            name = str(meta["name"])
+            cuda.memcpy_dtoh_async(host_buffers[name], device_buffers[name], stream)
+        stream.synchronize()
+    except Exception as e:
+        return InferResult(False, None, f"Failed to read TensorRT outputs: {e}")
+
+    out = {str(meta["name"]): host_buffers[str(meta["name"])] for meta in outputs_meta}
+    st = float(score_thresh) if score_thresh is not None else float(post_cfg.get("score_threshold_default", 0.3))
+    mt = float(mask_thresh) if mask_thresh is not None else float(post_cfg.get("mask_threshold_default", 0.5))
+    want_masks = (str(pre_cfg.get("task") or "") == "seg")
+
+    boxes, scores, labels, masks = parse_model_output_generic(
+        out,
+        img_w=int(target_w),
+        img_h=int(target_h),
+        score_thresh=float(st),
+        want_masks=bool(want_masks),
+        mask_thresh=float(mt),
+        topk=int(topk),
+    )
+
+    if lb is not None:
+        boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
+        if want_masks and masks is not None:
+            masks = [unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h) for m in masks]
+
+    payload = detections_to_json(
+        boxes=boxes,
+        scores=scores,
+        labels=labels,
+        class_names=class_names,
+        image_id=image_path.name,
+        score_thresh=float(st),
+    )
+    payload["inference_backend"] = "tensorrt"
+    if want_masks and masks is not None:
+        payload["masks_present"] = True
+
+    return InferResult(True, payload, "ok:tensorrt", boxes=boxes, scores=scores, labels=labels, masks=masks)
+
+
 def _run_onnx_inference(
     *,
     bundle_dir: Path,
@@ -352,13 +552,30 @@ def infer_from_bundle(
     task = str(model_cfg.get("task") or "detect").strip().lower()
     topk_final = int(topk) if topk is not None else int(post_cfg.get("topk_default", 300) or 300)
     backend_norm = str(backend or "auto").strip().lower()
+    engine_path = bundle_dir / "model.engine"
     onnx_path = bundle_dir / "model.onnx"
 
-    if backend_norm not in {"auto", "onnx", "pytorch"}:
+    if backend_norm not in {"auto", "tensorrt", "onnx", "pytorch"}:
         return InferResult(False, None, f"Unsupported backend: {backend}")
 
+    if backend_norm == "tensorrt" and not engine_path.exists():
+        return InferResult(False, None, f"TensorRT engine not found: {engine_path}")
     if backend_norm == "onnx" and not onnx_path.exists():
         return InferResult(False, None, f"ONNX model not found: {onnx_path}")
+
+    if backend_norm in {"auto", "tensorrt"} and engine_path.exists():
+        trt_res = _run_tensorrt_inference(
+            bundle_dir=bundle_dir,
+            image_path=image_path,
+            pre_cfg={**pre_cfg, "task": task},
+            post_cfg=post_cfg,
+            class_names=class_names,
+            score_thresh=score_thresh,
+            mask_thresh=mask_thresh,
+            topk=int(topk_final),
+        )
+        if trt_res.ok or backend_norm == "tensorrt":
+            return trt_res
 
     if backend_norm in {"auto", "onnx"} and onnx_path.exists():
         onnx_res = _run_onnx_inference(

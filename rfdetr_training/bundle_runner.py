@@ -184,7 +184,7 @@ def main() -> int:
     ap.add_argument("--bundle-dir", default=".", help="Bundle directory (contains model.onnx/checkpoint.pth + *config.json)")
     ap.add_argument("--image", "-i", required=True, help="Path to an image")
     ap.add_argument("--weights", default=None, help="Override PyTorch checkpoint path (default: bundle/checkpoint.pth)")
-    ap.add_argument("--backend", choices=["auto", "onnx", "pytorch"], default="auto", help="Inference backend. Default: auto (prefer ONNX)")
+    ap.add_argument("--backend", choices=["auto", "tensorrt", "onnx", "pytorch"], default="auto", help="Inference backend. Default: auto (prefer TensorRT, then ONNX)")
     ap.add_argument("--device", default=None, help="cuda, cuda:0, cpu (default: auto)")
     ap.add_argument("--threshold", type=float, default=None, help="Override score threshold")
     ap.add_argument("--mask-thresh", type=float, default=None, help="Override mask threshold (seg only)")

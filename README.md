@@ -104,10 +104,12 @@ After training, you can create a self-contained folder you can copy into another
 
 - Recommended: bundle the portable checkpoint source and let the bundler produce the primary ONNX artifact:
   - `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_portable.pth --zip`
+- To also include a TensorRT engine in the bundle, add `--export tensorrt` (requires `trtexec` on `PATH`).
 - If you want to bundle a training checkpoint directly, the bundler will still write a weights-only `checkpoint.pth` fallback by default and also ship `model.onnx`:
   - `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --zip`
   - Optional: include the original checkpoint as `checkpoint_raw.pth` (trusted/debug only) with `--include-raw-checkpoint`.
-- `infer.py` now prefers ONNX automatically. You can force a backend with `--backend onnx` or `--backend pytorch`.
+- If the bundle also contains `model.engine`, `infer.py` now tries TensorRT first, then falls back to ONNX automatically, then PyTorch fallback last.
+- You can force a backend with `--backend tensorrt`, `--backend onnx`, or `--backend pytorch`.
 - If weights-only extraction fails, bundle creation now stops by default instead of silently copying the raw checkpoint. Use `--allow-raw-checkpoint-fallback` only for trusted/debug scenarios.
 - Inside the bundle folder, install the primary runtime with `pip install -r requirements.txt`.
 - Install `requirements-pytorch-fallback.txt` only if you want checkpoint-based fallback inference.
