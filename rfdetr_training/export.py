@@ -104,6 +104,7 @@ def export_onnx(
     use_checkpoint_model: bool,
     checkpoint_key: Optional[str],
     strict: bool,
+    batchless_input: bool = False,
 ) -> ExportResult:
     try:
         import torch
@@ -236,19 +237,72 @@ def export_onnx(
             # If rfdetr isn't installed or the module path differs, just skip.
             yield
 
+    @contextlib.contextmanager
+    def _patch_topk_for_tensorrt_onnx():
+        """Avoid exporting `TopK(axis=1)` on batch-shaped tensors for static batch=1.
+
+        TensorRT 8.6's ONNX parser rejects the RF-DETR two-stage query-selection
+        pattern when it is exported as TopK over axis 1 of a rank-2 tensor
+        shaped like `(batch, proposals)`. During bundle/export we trace with a
+        fixed batch size of 1, so we can safely squeeze the batch dimension for
+        the TopK call and then restore it. This preserves the batch-1 semantics
+        while producing a TensorRT-compatible ONNX graph.
+        """
+
+        orig_topk = torch.topk
+
+        def patched(input, k, dim=None, largest=True, sorted=True, *, out=None):
+            if (
+                out is None
+                and isinstance(input, torch.Tensor)
+                and input.dim() == 2
+                and dim in (1, -1)
+            ):
+                flat_input = input.reshape(-1)
+                values, indices = orig_topk(
+                    flat_input,
+                    k,
+                    dim=0,
+                    largest=largest,
+                    sorted=sorted,
+                )
+                return values.unsqueeze(0), indices.unsqueeze(0)
+            return orig_topk(input, k, dim=dim, largest=largest, sorted=sorted, out=out)
+
+        torch.topk = patched  # type: ignore[assignment]
+        try:
+            yield
+        finally:
+            torch.topk = orig_topk  # type: ignore[assignment]
+
     class OnnxWrapper(nn.Module):
-        def __init__(self, inner: nn.Module, want_masks: bool):
+        def __init__(self, inner: nn.Module, want_masks: bool, *, batchless_input: bool):
             super().__init__()
             self.inner = inner
             self.want_masks = want_masks
+            self.batchless_input = batchless_input
 
         def forward(self, images: torch.Tensor):  # type: ignore[override]
+            if self.batchless_input and images.dim() == 3:
+                images = images.unsqueeze(0)
             out = self.inner(images)
-            return _extract_outputs(out, want_masks=self.want_masks)
+            tensors = _extract_outputs(out, want_masks=self.want_masks)
+            if self.batchless_input:
+                squeezed = []
+                for tensor in tensors:
+                    if isinstance(tensor, torch.Tensor) and tensor.dim() > 0 and tensor.shape[0] == 1:
+                        squeezed.append(tensor[0])
+                    else:
+                        squeezed.append(tensor)
+                return tuple(squeezed)
+            return tensors
 
-    wrapper = OnnxWrapper(module, want_masks=want_masks).to(torch_device).eval()
+    wrapper = OnnxWrapper(module, want_masks=want_masks, batchless_input=bool(batchless_input)).to(torch_device).eval()
 
-    dummy = torch.randn(1, 3, int(height), int(width), device=torch_device)
+    if batchless_input:
+        dummy = torch.randn(3, int(height), int(width), device=torch_device)
+    else:
+        dummy = torch.randn(1, 3, int(height), int(width), device=torch_device)
 
     # output paths
     if output is None:
@@ -265,18 +319,23 @@ def export_onnx(
     dynamic_axes = None
     if dynamic:
         dynamic_axes = {
-            "images": {0: "batch", 2: "height", 3: "width"},
-            "pred_logits": {0: "batch", 1: "num_queries"},
-            "pred_boxes": {0: "batch", 1: "num_queries"},
+            "images": ({1: "height", 2: "width"} if batchless_input else {0: "batch", 2: "height", 3: "width"}),
+            "pred_logits": ({0: "num_queries"} if batchless_input else {0: "batch", 1: "num_queries"}),
+            "pred_boxes": ({0: "num_queries"} if batchless_input else {0: "batch", 1: "num_queries"}),
         }
         if want_masks:
-            dynamic_axes["pred_masks"] = {0: "batch", 1: "num_queries", 2: "mask_h", 3: "mask_w"}
+            dynamic_axes["pred_masks"] = (
+                {0: "num_queries", 1: "mask_h", 2: "mask_w"}
+                if batchless_input
+                else {0: "batch", 1: "num_queries", 2: "mask_h", 3: "mask_w"}
+            )
 
     try:
         def _do_export(opset_version: int) -> None:
             with contextlib.ExitStack() as stack:
                 stack.enter_context(_disable_interpolate_antialias_for_onnx())
                 stack.enter_context(_patch_rfdetr_projector_layernorm_for_onnx())
+                stack.enter_context(_patch_topk_for_tensorrt_onnx())
                 torch.onnx.export(
                     wrapper,
                     dummy,
@@ -334,14 +393,11 @@ def export_tensorrt_from_onnx(
             "TensorRT export requires `trtexec` on PATH. Install TensorRT and ensure `trtexec` is available.",
         )
 
-    shapes = f"images:1x3x{int(height)}x{int(width)}"
     cmd = [
         trtexec,
         f"--onnx={str(onnx_path)}",
         f"--saveEngine={str(engine_path)}",
-        "--explicitBatch",
-        f"--shapes={shapes}",
-        f"--workspace={int(workspace_mb)}",
+        f"--memPoolSize=workspace:{int(workspace_mb)}",
     ]
     if fp16:
         cmd.append("--fp16")

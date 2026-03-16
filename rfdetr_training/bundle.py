@@ -724,35 +724,40 @@ def create_bundle(
 
         if fmt == "tensorrt":
             tensorrt_status = "requested"
-            if onnx_path is None:
-                res = export_onnx(
-                    dataset_dir=dataset_dir,
-                    weights=weights,
-                    task=task_final,
-                    size=size_final,
-                    output=(bundle_dir / "model.onnx"),
-                    device=device,
-                    height=int(h),
-                    width=int(w),
-                    opset=int(opset),
-                    dynamic=False,
-                    use_checkpoint_model=bool(use_checkpoint_model),
-                    checkpoint_key=checkpoint_key,
-                    strict=bool(strict),
-                )
-                if not res.ok or res.output_path is None:
-                    return BundleResult(False, None, f"Bundle created but ONNX export failed (required for TensorRT): {res.message}")
-                onnx_path = res.output_path
-
-            engine_path = bundle_dir / "model.engine"
-            trt_res = export_tensorrt_from_onnx(
-                onnx_path=onnx_path,
-                engine_path=engine_path,
+            trt_onnx_path = bundle_dir / "_model_trt.onnx"
+            res = export_onnx(
+                dataset_dir=dataset_dir,
+                weights=weights,
+                task=task_final,
+                size=size_final,
+                output=trt_onnx_path,
+                device=device,
                 height=int(h),
                 width=int(w),
-                fp16=bool(fp16),
-                workspace_mb=int(workspace_mb),
+                opset=int(opset),
+                dynamic=False,
+                use_checkpoint_model=bool(use_checkpoint_model),
+                checkpoint_key=checkpoint_key,
+                strict=bool(strict),
+                batchless_input=True,
             )
+            if not res.ok or res.output_path is None:
+                return BundleResult(False, None, f"Bundle created but TensorRT ONNX export failed: {res.message}")
+            engine_path = bundle_dir / "model.engine"
+            try:
+                trt_res = export_tensorrt_from_onnx(
+                    onnx_path=res.output_path,
+                    engine_path=engine_path,
+                    height=int(h),
+                    width=int(w),
+                    fp16=bool(fp16),
+                    workspace_mb=int(workspace_mb),
+                )
+            finally:
+                try:
+                    trt_onnx_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
             if not trt_res.ok:
                 tensorrt_status = "failed"
                 tensorrt_message = trt_res.message

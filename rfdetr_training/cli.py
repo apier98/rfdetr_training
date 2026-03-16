@@ -769,6 +769,7 @@ def main(argv: List[str] | None = None) -> int:
             use_checkpoint_model=bool(args.use_checkpoint_model),
             checkpoint_key=args.checkpoint_key,
             strict=bool(args.strict),
+            batchless_input=True,
         )
         if not onnx_res.ok or onnx_res.output_path is None:
             print(f"Error: {onnx_res.message}", file=sys.stderr)
