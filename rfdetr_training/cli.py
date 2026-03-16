@@ -314,7 +314,20 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--num-workers", type=int, default=None, help="Dataloader workers (Windows recommended: 0)")
     tr.add_argument("--resolution", type=int, default=None, help="Training resolution; must be divisible by 32 (often 224 works well)")
     tr.add_argument("--output-dir", "-o", default=None)
-    tr.add_argument("--pretrained", action="store_true")
+    pre = tr.add_mutually_exclusive_group()
+    pre.add_argument(
+        "--pretrained",
+        dest="pretrained",
+        action="store_true",
+        default=True,
+        help="Use the upstream RF-DETR default pretrained weights for the selected model size. Default: enabled.",
+    )
+    pre.add_argument(
+        "--no-pretrained",
+        dest="pretrained",
+        action="store_false",
+        help="Disable upstream pretrained initialization and start from scratch.",
+    )
     tr.add_argument("--pretrain-weights", default=None)
     tr.add_argument("--tensorboard", action="store_true")
     tr.add_argument("--wandb", action="store_true")

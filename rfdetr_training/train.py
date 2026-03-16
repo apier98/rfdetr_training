@@ -345,14 +345,17 @@ def train(cfg: TrainConfig) -> int:
     if cfg.resume and cfg.finetune_from:
         print("Error: --resume and --finetune-from are mutually exclusive.", file=sys.stderr)
         return 5
+    if (not cfg.pretrained) and cfg.pretrain_weights:
+        print("Error: --no-pretrained cannot be combined with --pretrain-weights.", file=sys.stderr)
+        return 5
 
     # instantiate model
     try:
         # Pretraining behavior:
-        # - If --pretrained is set and --pretrain-weights is not provided, allow rfdetr's default
-        #   behavior (often downloads/loads a matching pretrained checkpoint) by *omitting*
-        #   the pretrain_weights kwarg.
-        # - Otherwise (default), disable downloads for reproducibility.
+        # - By default, match upstream RF-DETR fine-tuning behavior by allowing the selected
+        #   model class to use its default pretrained weights.
+        # - --no-pretrained disables that and starts from scratch.
+        # - --pretrain-weights overrides the default pretrained source with a user-provided path.
         if cfg.pretrain_weights:
             pretrain_weights = cfg.pretrain_weights
             force_kwarg = True

@@ -74,9 +74,9 @@ If you see duplicated class names / wrong `num_classes`, align COCO categories t
 Common training options:
 - Windows stability: add `--num-workers 0`
 - If you see the “Inference tensors cannot be saved for backward” error: add `--patch-inference-mode`
-- Fine-tune from a pretrained RF-DETR checkpoint: add `--pretrained`
-  - If `--pretrained` is set and `--pretrain-weights` is omitted, we let `rfdetr` apply its default pretrained weights behavior.
-  - If `--pretrained` is not set, we default to disabling pretrained downloads/loads for reproducibility.
+- Training now follows the upstream RF-DETR recommendation by default: we fine-tune from the selected model size's default pretrained weights for both detect and seg.
+- To train from scratch instead, pass `--no-pretrained`.
+- To override the default pretrained source, pass `--pretrain-weights path\to\weights.pth`.
 - Start a new run from weights: `--finetune-from path\to\checkpoint.pth`
 - Continue an existing run: `--resume path\to\checkpoint.pth`
 - Evaluation only (no training): add `--eval-only`

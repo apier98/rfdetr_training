@@ -21,7 +21,7 @@ They are intentionally not part of the “supported” training interface to kee
 - `scripts/infer_webcam.py`: Webcam inference (display).
 - `scripts/batch_infer.py`: Batch inference over a directory; writes JSON detections.
 - `scripts/visualize_annotations.py`: Visualize COCO annotations by sampling images.
-- `scripts/commit_from_staging.py`: Merge staged labeled COCO JSON(s) into `coco/<split>`.
+- `scripts/commit_from_staging.py`: Merge staged labeled COCO JSON(s) into `coco/<split>`. Note: `staging/` is not created automatically by `dataset create`; create it manually if you use this helper.
 - `scripts/remove_coco_class.py`: Remove one or more `category_id` values across splits.
 - `scripts/remap_coco_ids.py`: Deprecated wrapper. Prefer `python -m rfdetr_training dataset normalize-coco-ids ...`.
 - `scripts/compute_detection_stats.py`: Quick per-class stats by IoU matching.
