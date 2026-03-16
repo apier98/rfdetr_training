@@ -167,10 +167,7 @@ def parse_model_output_detr(
     mask_thresh: float,
 ) -> Tuple[List[List[float]], List[float], List[int], Optional[List[Any]]]:
     """Parse DETR-style raw outputs (pred_logits, pred_boxes[, pred_masks])."""
-    try:
-        import torch
-    except Exception:
-        return [], [], [], None
+    import numpy as np
 
     if not isinstance(out, dict):
         return [], [], [], None
@@ -185,7 +182,14 @@ def parse_model_output_detr(
             masks = out.get(k)
             break
 
-    if not isinstance(logits, torch.Tensor) or not isinstance(boxes, torch.Tensor):
+    logits = _tensor_to_numpy(logits)
+    boxes = _tensor_to_numpy(boxes)
+    masks = _tensor_to_numpy(masks)
+    logits = np.asarray(logits) if logits is not None else None
+    boxes = np.asarray(boxes) if boxes is not None else None
+    masks = np.asarray(masks) if masks is not None else None
+
+    if logits is None or boxes is None:
         return [], [], [], None
 
     # allow batched outputs
@@ -204,18 +208,21 @@ def parse_model_output_detr(
     # Some models use a "no-object" class (softmax over C+1), while others emit
     # per-class logits without a background (often sigmoid over C).
     if int(logits0.shape[-1]) == 1:
-        probs = torch.sigmoid(logits0)
+        probs = 1.0 / (1.0 + np.exp(-logits0))
         scores_t = probs[:, 0]
-        labels_t = torch.zeros((scores_t.shape[0],), dtype=torch.int64, device=scores_t.device)
+        labels_t = np.zeros((scores_t.shape[0],), dtype=np.int64)
     else:
-        probs = torch.softmax(logits0, dim=-1)
+        logits_shift = logits0 - np.max(logits0, axis=-1, keepdims=True)
+        exp_logits = np.exp(logits_shift)
+        probs = exp_logits / np.clip(np.sum(exp_logits, axis=-1, keepdims=True), 1e-12, None)
         # common DETR convention: last class is "no-object"
         if probs.shape[-1] > 1:
             probs = probs[..., :-1]
-        scores_t, labels_t = probs.max(dim=-1)
+        labels_t = np.argmax(probs, axis=-1).astype(np.int64)
+        scores_t = np.max(probs, axis=-1)
     keep = scores_t >= float(score_thresh)
-    if keep.any():
-        idx = torch.nonzero(keep, as_tuple=False).squeeze(1)
+    if bool(np.any(keep)):
+        idx = np.nonzero(keep)[0]
         scores_k = scores_t[idx]
         labels_k = labels_t[idx]
         boxes_k = boxes0[idx]
@@ -223,29 +230,25 @@ def parse_model_output_detr(
         return [], [], [], None
 
     # Sort by score desc and keep topk.
-    order = torch.argsort(scores_k, descending=True)
-    if int(topk) > 0 and order.numel() > int(topk):
+    order = np.argsort(-scores_k)
+    if int(topk) > 0 and int(order.shape[0]) > int(topk):
         order = order[: int(topk)]
     scores_k = scores_k[order]
     labels_k = labels_k[order]
     boxes_k = boxes_k[order]
-
-    boxes_np = _tensor_to_numpy(boxes_k)
-    scores_np = _tensor_to_numpy(scores_k)
-    labels_np = _tensor_to_numpy(labels_k)
 
     out_boxes: List[List[float]] = []
     out_scores: List[float] = []
     out_labels: List[int] = []
 
     # boxes are typically cxcywh normalized in 0..1
-    maxv = float(getattr(boxes_k, "max", lambda: 0.0)().item()) if isinstance(boxes_k, torch.Tensor) else 0.0
+    maxv = float(np.max(boxes_k)) if int(boxes_k.size) > 0 else 0.0
     normalized = maxv <= 1.5
 
     for i in range(int(scores_k.shape[0])):
-        sc = float(scores_np[i])
-        lab = int(labels_np[i])
-        cx, cy, bw, bh = [float(x) for x in boxes_np[i].tolist()]
+        sc = float(scores_k[i])
+        lab = int(labels_k[i])
+        cx, cy, bw, bh = [float(x) for x in boxes_k[i].tolist()]
         if normalized:
             cx *= float(model_w)
             cy *= float(model_h)
@@ -260,21 +263,16 @@ def parse_model_output_detr(
         out_labels.append(lab)
 
     out_masks: Optional[List[Any]] = None
-    if want_masks and masks is not None:
+    if want_masks and masks is not None and int(masks.size) > 0:
         try:
-            m = masks
-            if isinstance(m, torch.Tensor):
-                if m.ndim == 4:
-                    m0 = m[0]
-                else:
-                    m0 = m
-                if m0.ndim == 3:
-                    # align to kept query order
-                    m0 = m0[idx][order]
-                    mp = torch.sigmoid(m0) if m0.dtype.is_floating_point else m0
-                    out_masks = []
-                    for j in range(int(mp.shape[0])):
-                        out_masks.append((_tensor_to_numpy(mp[j]) >= float(mask_thresh)))
+            m0 = masks[0] if masks.ndim == 4 else masks
+            if m0.ndim == 3:
+                m0 = m0[idx][order]
+                if np.issubdtype(m0.dtype, np.floating):
+                    m0 = 1.0 / (1.0 + np.exp(-m0))
+                out_masks = []
+                for j in range(int(m0.shape[0])):
+                    out_masks.append(np.asarray(m0[j]) >= float(mask_thresh))
         except Exception:
             out_masks = None
 
@@ -396,53 +394,50 @@ def parse_model_output_generic(
 
     # 2) dict with decoded boxes/scores/labels
     try:
-        import torch
+        import numpy as np
 
         out0 = output[0] if isinstance(output, (list, tuple)) else output
         if isinstance(out0, dict) and "boxes" in out0:
-            b = out0.get("boxes")
-            s = out0.get("scores")
-            l = out0.get("labels") or out0.get("classes")
+            b = _tensor_to_numpy(out0.get("boxes"))
+            s = _tensor_to_numpy(out0.get("scores"))
+            l = _tensor_to_numpy(out0.get("labels") or out0.get("classes"))
             m = None
             if want_masks:
                 for k in ("masks", "mask", "pred_masks", "segmentation"):
                     if k in out0:
-                        m = out0[k]
+                        m = _tensor_to_numpy(out0[k])
                         break
 
-            if isinstance(b, torch.Tensor):
-                b = b.detach().cpu()
-                if b.numel() == 0:
+            if b is not None:
+                b = np.asarray(b)
+                if int(b.size) == 0:
                     return [], [], [], None
                 if s is None:
-                    s = torch.ones((b.shape[0],))
+                    s = np.ones((b.shape[0],), dtype=np.float32)
                 else:
-                    s = s.detach().cpu()
+                    s = np.asarray(s).reshape(-1)
                 if l is None:
-                    l = torch.zeros((b.shape[0],), dtype=torch.int64)
+                    l = np.zeros((b.shape[0],), dtype=np.int64)
                 else:
-                    l = l.detach().cpu().long()
+                    l = np.asarray(l).reshape(-1).astype(np.int64)
 
                 boxes: List[List[float]] = []
                 scores: List[float] = []
                 labels: List[int] = []
                 keep_idx: List[int] = []
                 for i in range(int(b.shape[0])):
-                    sc = float(s[i].item())
+                    sc = float(s[i])
                     if sc < float(score_thresh):
                         continue
                     keep_idx.append(i)
-                    boxes.append([float(x) for x in b[i].tolist()])
+                    boxes.append([float(x) for x in np.asarray(b[i]).tolist()])
                     scores.append(sc)
-                    labels.append(int(l[i].item()))
+                    labels.append(int(l[i]))
 
                 masks_out: Optional[List[Any]] = None
                 if want_masks and m is not None:
                     try:
-                        import numpy as np
-
-                        mm = _tensor_to_numpy(m)
-                        mm = np.asarray(mm)
+                        mm = np.asarray(m)
                         if mm.ndim == 4 and mm.shape[1] == 1:
                             mm = mm[:, 0]
                         if mm.ndim == 3:
@@ -491,4 +486,3 @@ def detections_to_json(
         lname = class_names[lid] if class_names and 0 <= lid < len(class_names) else str(lid)
         out["detections"].append({"bbox": [float(x) for x in boxes[i]], "score": sc, "label_id": lid, "label_name": lname})
     return out
-

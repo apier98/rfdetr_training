@@ -131,7 +131,13 @@ def build_parser() -> argparse.ArgumentParser:
     bd.add_argument("--output-dir", "-o", default=None, help="Output bundle directory (default: datasets/<UUID>/deploy/<weights>_<timestamp>)")
     bd.add_argument("--height", type=int, default=None, help="Model input height (default: trained resolution or 640)")
     bd.add_argument("--width", type=int, default=None, help="Model input width (default: trained resolution or 640)")
-    bd.add_argument("--export", action="append", default=None, choices=["onnx", "tensorrt"], help="Optional: include exported formats (repeatable)")
+    bd.add_argument(
+        "--export",
+        action="append",
+        default=None,
+        choices=["onnx", "tensorrt"],
+        help="Extra exported formats to include. Default behavior already ships ONNX as the primary bundle artifact.",
+    )
     bd.add_argument("--opset", type=int, default=18, help="ONNX opset")
     bd.add_argument("--dynamic", action="store_true", help="ONNX: export dynamic H/W axes")
     bd.add_argument("--device", default=None, help="Device for export (e.g. cuda:0, cpu)")
@@ -150,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="portable_checkpoint",
         action="store_false",
         help="Copy the checkpoint verbatim into the bundle (may require unsafe torch.load weights_only=False on some PyTorch versions).",
+    )
+    bd.add_argument(
+        "--allow-raw-checkpoint-fallback",
+        action="store_true",
+        help="If weights-only checkpoint extraction fails, copy the raw checkpoint into the bundle instead (trusted/debug only).",
     )
     bd.add_argument(
         "--include-raw-checkpoint",
@@ -173,7 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
     inf = sub.add_parser("infer", help="Run inference using a deployment bundle directory (debug/smoke check)")
     inf.add_argument("--bundle-dir", "-b", required=True)
     inf.add_argument("--image", "-i", required=True)
-    inf.add_argument("--weights", "-w", default=None, help="Override weights path (default: <bundle>/checkpoint.pth)")
+    inf.add_argument("--weights", "-w", default=None, help="Override fallback checkpoint path (default: <bundle>/checkpoint.pth)")
+    inf.add_argument("--backend", choices=["auto", "onnx", "pytorch"], default="auto", help="Inference backend. Default: auto (prefer ONNX)")
     inf.add_argument("--device", default=None)
     inf.add_argument("--threshold", type=float, default=None)
     inf.add_argument("--mask-thresh", type=float, default=None)
@@ -767,6 +779,7 @@ def main(argv: List[str] | None = None) -> int:
             fp16=bool(args.fp16),
             workspace_mb=int(args.workspace_mb),
             portable_checkpoint=bool(args.portable_checkpoint),
+            allow_raw_checkpoint_fallback=bool(args.allow_raw_checkpoint_fallback),
             include_raw_checkpoint=bool(args.include_raw_checkpoint),
             make_zip=bool(args.zip),
             overwrite=bool(args.overwrite),
@@ -791,6 +804,7 @@ def main(argv: List[str] | None = None) -> int:
             checkpoint_key=args.checkpoint_key,
             use_checkpoint_model=bool(args.use_checkpoint_model),
             strict=bool(args.strict),
+            backend=str(args.backend),
         )
         if not res.ok or res.payload is None:
             print(f"Error: {res.message}", file=sys.stderr)

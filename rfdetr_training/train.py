@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import sys
 import os
@@ -54,6 +55,15 @@ class TrainConfig:
     do_random_resize_via_padding: Optional[bool]
     aug_config: Optional[Dict[str, Any]]
     no_aug: bool
+
+
+def _package_version(dist_name: str) -> Optional[str]:
+    try:
+        return importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    except Exception:
+        return None
 
 
 def _summarize_training_outputs(out_dir: Path) -> None:
@@ -152,6 +162,14 @@ def _write_deployment_bundle(out_dir: Path, dataset_dir: Path, cfg: TrainConfig,
             "python": sys.version.split()[0],
             "torch": torch_ver,
             "rfdetr": rfdetr_ver,
+            "runtime_versions": {
+                "python": sys.version.split()[0],
+                "torch": torch_ver,
+                "torchvision": _package_version("torchvision"),
+                "rfdetr": rfdetr_ver,
+                "pillow": _package_version("pillow"),
+                "numpy": _package_version("numpy"),
+            },
             "dataset_uuid": metadata.get("uuid"),
             "dataset_name": metadata.get("name"),
         }

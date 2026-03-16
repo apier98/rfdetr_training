@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import shutil
+import sys
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +34,65 @@ def _write_json(path: Path, obj: Dict[str, Any]) -> None:
 def _default_bundle_dir(dataset_dir: Path, *, weights: Path) -> Path:
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
     return dataset_dir / "deploy" / f"{_safe_name(weights.stem)}_{stamp}"
+
+
+def _package_version(dist_name: str) -> Optional[str]:
+    try:
+        return importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _bundle_runtime_versions() -> Dict[str, Optional[str]]:
+    return {
+        "python": sys.version.split()[0],
+        "torch": _package_version("torch"),
+        "torchvision": _package_version("torchvision"),
+        "rfdetr": _package_version("rfdetr"),
+        "pillow": _package_version("pillow"),
+        "numpy": _package_version("numpy"),
+        "onnxruntime": (_package_version("onnxruntime") or _package_version("onnxruntime-gpu")),
+    }
+
+
+def _bundle_requirements_text(runtime_versions: Dict[str, Optional[str]]) -> str:
+    lines = [
+        "# Primary runtime requirements for this bundle.",
+        "# This bundle is ONNX-first: `infer.py` will prefer model.onnx when present.",
+        "",
+    ]
+    for dist_name, key in (
+        ("onnxruntime", "onnxruntime"),
+        ("pillow", "pillow"),
+        ("numpy", "numpy"),
+    ):
+        version = runtime_versions.get(key)
+        lines.append(f"{dist_name}=={version}" if version else dist_name)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _bundle_pytorch_fallback_requirements_text(runtime_versions: Dict[str, Optional[str]]) -> str:
+    lines = [
+        "# Optional PyTorch fallback runtime for this bundle.",
+        "# Install these only if you want `infer.py --backend pytorch` or need checkpoint-based fallback inference.",
+        "# If an exact torch wheel is unavailable for your target machine, install a compatible",
+        "# PyTorch build manually first, then install the remaining requirements from this file.",
+        "",
+    ]
+    for dist_name, key in (
+        ("torch", "torch"),
+        ("torchvision", "torchvision"),
+        ("rfdetr", "rfdetr"),
+        ("pillow", "pillow"),
+        ("numpy", "numpy"),
+    ):
+        version = runtime_versions.get(key)
+        lines.append(f"{dist_name}=={version}" if version else dist_name)
+    lines.append("")
+    return "\n".join(lines)
 
 
 _INFER_SCRIPT = r"""#!/usr/bin/env python3
@@ -390,6 +451,7 @@ def create_bundle(
     fp16: bool,
     workspace_mb: int,
     portable_checkpoint: bool,
+    allow_raw_checkpoint_fallback: bool,
     include_raw_checkpoint: bool,
     make_zip: bool,
     overwrite: bool,
@@ -437,6 +499,7 @@ def create_bundle(
     # Resolve task/size: prefer explicit CLI args; otherwise use training metadata.
     task_final = str((task or trained_model_cfg.get("task") or "detect")).strip().lower()
     size_final = str((size or trained_model_cfg.get("size") or "nano")).strip().lower()
+    runtime_versions = _bundle_runtime_versions()
 
     # Write configs at bundle root.
     _write_json(bundle_dir / "classes.json", list(class_names))
@@ -449,6 +512,7 @@ def create_bundle(
         "resolution": trained_res if trained_res is not None else None,
         "dataset_uuid": md.get("uuid"),
         "dataset_name": md.get("name"),
+        "runtime_versions": runtime_versions,
     }
     _write_json(bundle_dir / "model_config.json", model_config)
 
@@ -490,7 +554,13 @@ def create_bundle(
     }
     _write_json(bundle_dir / "postprocess.json", postprocess)
 
-    # Write weights into bundle.
+    requested_exports = [str(ex).strip().lower() for ex in exports if str(ex).strip()]
+    if not requested_exports:
+        requested_exports = ["onnx"]
+    if "tensorrt" in requested_exports and "onnx" not in requested_exports:
+        requested_exports.insert(0, "onnx")
+
+    # Write weights into bundle as the fallback/debug artifact.
     dst_weights = bundle_dir / "checkpoint.pth"
     raw_ckpt_in_bundle = None
     if include_raw_checkpoint:
@@ -519,20 +589,41 @@ def create_bundle(
                 checkpoint_write_mode = "portable_state_dict"
                 checkpoint_write_message = msg
             else:
+                if not allow_raw_checkpoint_fallback:
+                    return BundleResult(
+                        False,
+                        None,
+                        "Portable checkpoint creation failed. Re-run with "
+                        "`--allow-raw-checkpoint-fallback` if you explicitly want to copy the raw checkpoint into the bundle. "
+                        f"Reason: {msg}",
+                    )
                 checkpoint_write_mode = "copied_fallback"
                 checkpoint_write_message = msg
                 shutil.copy2(weights, dst_weights)
         except Exception as e:
+            if not allow_raw_checkpoint_fallback:
+                return BundleResult(
+                    False,
+                    None,
+                    "Portable checkpoint creation failed. Re-run with "
+                    "`--allow-raw-checkpoint-fallback` if you explicitly want to copy the raw checkpoint into the bundle. "
+                    f"Reason: {e}",
+                )
             checkpoint_write_mode = "copied_fallback"
             checkpoint_write_message = str(e)
             shutil.copy2(weights, dst_weights)
     else:
         shutil.copy2(weights, dst_weights)
+        checkpoint_write_mode = "raw_checkpoint"
+        checkpoint_write_message = "Portable checkpoint disabled by CLI; copied checkpoint verbatim."
 
     # Write a self-contained inference runner.
     runner_path = Path(__file__).with_name("bundle_runner.py")
     (bundle_dir / "infer.py").write_text(runner_path.read_text(encoding="utf-8"), encoding="utf-8")
-    (bundle_dir / "requirements.txt").write_text("torch\ntorchvision\nrfdetr\npillow\nnumpy\n", encoding="utf-8")
+    (bundle_dir / "requirements.txt").write_text(_bundle_requirements_text(runtime_versions), encoding="utf-8")
+    (bundle_dir / "requirements-pytorch-fallback.txt").write_text(
+        _bundle_pytorch_fallback_requirements_text(runtime_versions), encoding="utf-8"
+    )
 
     # Vendor the minimal source package into the bundle so `python infer.py` works
     # without requiring `pip install -e .` or setting PYTHONPATH.
@@ -561,46 +652,30 @@ def create_bundle(
                 "```",
                 "",
                 "Notes:",
+                "- Primary shipped model format is ONNX (`model.onnx`). `infer.py` uses it by default when present.",
                 "- Preprocess keeps aspect ratio (letterbox) per `preprocess.json`.",
                 "- This bundle includes a vendored copy of the `rfdetr_training` package so `infer.py` can run without installing this repo.",
-                "- For best portability, checkpoints should be state_dict-based (not pickled model objects).",
+                "- Install the primary runtime with `pip install -r requirements.txt`.",
+                "- Install `requirements-pytorch-fallback.txt` only if you need checkpoint-based fallback inference.",
+                "- `checkpoint.pth` is included as a secondary fallback/debug artifact, not the primary shipping format.",
+                "- If `bundle_manifest.json` reports `checkpoint.mode=copied_fallback` or `raw_checkpoint`, the fallback checkpoint path may require unsafe checkpoint loading behavior and should be treated as trusted/debug only.",
                 "",
             ]
         ),
         encoding="utf-8",
     )
 
-    manifest = {
-        "format_version": 1,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "dataset_dir": str(dataset_dir),
-        "source_weights": str(weights),
-        "bundle_dir": str(bundle_dir),
-        "checkpoint": {
-            "path": str(dst_weights.name),
-            "mode": checkpoint_write_mode,
-            "message": checkpoint_write_message,
-            "raw_checkpoint_path": (str(raw_ckpt_in_bundle.name) if raw_ckpt_in_bundle else None),
-        },
-        "files": sorted([p.name for p in bundle_dir.iterdir() if p.is_file()]),
-    }
-    _write_json(bundle_dir / "bundle_manifest.json", manifest)
-
-    # Optional exports (ONNX / TensorRT) stored under bundle/exports/.
-    ex_dir = bundle_dir / "exports"
-    if exports:
-        ex_dir.mkdir(parents=True, exist_ok=True)
-
     onnx_path: Optional[Path] = None
-    for ex in exports:
+    engine_path: Optional[Path] = None
+    for ex in requested_exports:
         fmt = (ex or "").strip().lower()
         if fmt == "onnx":
             res = export_onnx(
                 dataset_dir=dataset_dir,
                 weights=weights,
-                task=task,
-                size=size,
-                output=(ex_dir / ("model_seg.onnx" if task == "seg" else "model_detect.onnx")),
+                task=task_final,
+                size=size_final,
+                output=(bundle_dir / "model.onnx"),
                 device=device,
                 height=int(h),
                 width=int(w),
@@ -619,9 +694,9 @@ def create_bundle(
                 res = export_onnx(
                     dataset_dir=dataset_dir,
                     weights=weights,
-                    task=task,
-                    size=size,
-                    output=(ex_dir / ("model_seg.onnx" if task == "seg" else "model_detect.onnx")),
+                    task=task_final,
+                    size=size_final,
+                    output=(bundle_dir / "model.onnx"),
                     device=device,
                     height=int(h),
                     width=int(w),
@@ -635,10 +710,10 @@ def create_bundle(
                     return BundleResult(False, None, f"Bundle created but ONNX export failed (required for TensorRT): {res.message}")
                 onnx_path = res.output_path
 
-            eng = ex_dir / (onnx_path.stem + ".engine")
+            engine_path = bundle_dir / "model.engine"
             trt_res = export_tensorrt_from_onnx(
                 onnx_path=onnx_path,
-                engine_path=eng,
+                engine_path=engine_path,
                 height=int(h),
                 width=int(w),
                 fp16=bool(fp16),
@@ -646,6 +721,41 @@ def create_bundle(
             )
             if not trt_res.ok:
                 return BundleResult(False, None, f"Bundle created but TensorRT export failed: {trt_res.message}")
+
+    manifest = {
+        "format_version": 2,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "dataset_dir": str(dataset_dir),
+        "source_weights": str(weights),
+        "bundle_dir": str(bundle_dir),
+        "runtime_versions": runtime_versions,
+        "primary_artifact": {
+            "format": "onnx" if onnx_path is not None else "pytorch-checkpoint",
+            "path": (str(onnx_path.name) if onnx_path is not None else str(dst_weights.name)),
+            "runtime": ("onnxruntime" if onnx_path is not None else "pytorch"),
+        },
+        "artifacts": {
+            "onnx_path": (str(onnx_path.name) if onnx_path is not None else None),
+            "tensorrt_engine_path": (str(engine_path.name) if engine_path is not None else None),
+            "checkpoint_path": str(dst_weights.name),
+            "raw_checkpoint_path": (str(raw_ckpt_in_bundle.name) if raw_ckpt_in_bundle else None),
+        },
+        "portability": {
+            "portable_checkpoint_requested": bool(portable_checkpoint),
+            "allow_raw_checkpoint_fallback": bool(allow_raw_checkpoint_fallback),
+            "strict_checkpoint_loading": bool(strict),
+            "self_contained_python_runner": True,
+            "onnx_is_primary": bool(onnx_path is not None),
+        },
+        "checkpoint": {
+            "path": str(dst_weights.name),
+            "mode": checkpoint_write_mode,
+            "message": checkpoint_write_message,
+            "raw_checkpoint_path": (str(raw_ckpt_in_bundle.name) if raw_ckpt_in_bundle else None),
+        },
+        "files": sorted(({p.name for p in bundle_dir.iterdir() if p.is_file()} | {"bundle_manifest.json"})),
+    }
+    _write_json(bundle_dir / "bundle_manifest.json", manifest)
 
     if make_zip:
         zip_path = bundle_dir.with_suffix(".zip")

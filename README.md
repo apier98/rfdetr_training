@@ -97,14 +97,19 @@ Build a TensorRT engine (requires TensorRT `trtexec` on PATH):
 ## Deployment Bundle (portable)
 
 After training, you can create a self-contained folder you can copy into another project. It includes:
-`checkpoint.pth`, `classes.json`, `model_config.json`, `preprocess.json` (letterbox / keep aspect ratio),
-`postprocess.json`, and a standalone `infer.py` runner.
+`model.onnx` as the primary shipped model, `checkpoint.pth` as a fallback/debug artifact, `classes.json`,
+`model_config.json`, `preprocess.json` (letterbox / keep aspect ratio), `postprocess.json`,
+`bundle_manifest.json`, `requirements.txt`, `requirements-pytorch-fallback.txt`, and a standalone `infer.py` runner.
 
-- Recommended: bundle the portable checkpoint (PyTorch 2.6+ friendly weights-only):
+- Recommended: bundle the portable checkpoint source and let the bundler produce the primary ONNX artifact:
   - `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_portable.pth --zip`
-- If you want to bundle a training checkpoint directly, the bundler will still write a weights-only `checkpoint.pth` by default:
+- If you want to bundle a training checkpoint directly, the bundler will still write a weights-only `checkpoint.pth` fallback by default and also ship `model.onnx`:
   - `python -m rfdetr_training bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --zip`
   - Optional: include the original checkpoint as `checkpoint_raw.pth` (trusted/debug only) with `--include-raw-checkpoint`.
+- `infer.py` now prefers ONNX automatically. You can force a backend with `--backend onnx` or `--backend pytorch`.
+- If weights-only extraction fails, bundle creation now stops by default instead of silently copying the raw checkpoint. Use `--allow-raw-checkpoint-fallback` only for trusted/debug scenarios.
+- Inside the bundle folder, install the primary runtime with `pip install -r requirements.txt`.
+- Install `requirements-pytorch-fallback.txt` only if you want checkpoint-based fallback inference.
 - Run inside the bundle folder: `python infer.py --image path\\to\\image.jpg --out-json out.json --out-image out.png`
 - Segmentation: the bundle runner also supports `--mask-thresh` and `--mask-alpha` for mask overlays.
 
