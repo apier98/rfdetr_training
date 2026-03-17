@@ -293,7 +293,14 @@ def build_parser() -> argparse.ArgumentParser:
     ds_ing.add_argument("--dataset-dir", "-d", required=True)
     ds_ing.add_argument("--train-ratio", type=float, default=0.8)
     ds_ing.add_argument("--seed", type=int, default=0)
-    ds_ing.add_argument("--yolo-task", choices=["detect", "seg"], default="detect", help="How to interpret YOLO labels during conversion")
+    ds_ing.add_argument(
+        "--yolo-task",
+        "--task",
+        dest="yolo_task",
+        choices=["detect", "seg"],
+        default="detect",
+        help="How to interpret YOLO labels during conversion",
+    )
     ds_ing.add_argument("--images-ext", default="jpg,png", help="Comma-separated image extensions under raw/ (default: jpg,png)")
     ds_ing.add_argument("--mode", choices=["copy", "move"], default="copy", help="Copy/move images into coco splits (default: copy)")
     ds_ing.add_argument(

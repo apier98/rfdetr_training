@@ -213,6 +213,7 @@ def yolo_to_coco(
     raw_dir: Optional[Path] = None,
     yolo_dir: Optional[Path] = None,
     labeled_only: bool = False,
+    verbose: bool = True,
 ) -> None:
     import random
     import shutil
@@ -414,11 +415,12 @@ def yolo_to_coco(
             if not dst.exists():
                 shutil.copy2(img, dst)
 
-    print("Done.")
-    print(f"  Task: {task}")
-    print(f"  Train images: {len(images_info_train)} | Train annotations: {len(annotations_train)}")
-    print(f"  Valid images: {len(images_info_valid)} | Valid annotations: {len(annotations_valid)}")
-    print(f"  Wrote: {train_out_dir / '_annotations.coco.json'}")
-    print(f"  Wrote: {valid_out_dir / '_annotations.coco.json'}")
-    if copy_images:
-        print("  Copied images into coco/train and coco/valid.")
+    if verbose:
+        print("Done.")
+        print(f"  Task: {task}")
+        print(f"  Train images: {len(images_info_train)} | Train annotations: {len(annotations_train)}")
+        print(f"  Valid images: {len(images_info_valid)} | Valid annotations: {len(annotations_valid)}")
+        print(f"  Wrote: {train_out_dir / '_annotations.coco.json'}")
+        print(f"  Wrote: {valid_out_dir / '_annotations.coco.json'}")
+        if copy_images:
+            print("  Copied images into coco/train and coco/valid.")

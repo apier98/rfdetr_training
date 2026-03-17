@@ -20,6 +20,10 @@ class IngestResult:
     yolo_labels_processed: int = 0
     background_images_added: int = 0
     quarantined_items: int = 0
+    train_images: int = 0
+    train_annotations: int = 0
+    valid_images: int = 0
+    valid_annotations: int = 0
 
 
 def _looks_like_coco(path: Path) -> bool:
@@ -82,6 +86,18 @@ def _quarantine_write_json(quarantine_dir: Path, base_name: str, payload: Dict[s
     out = quarantine_dir / base_name
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return out
+
+
+def _count_split_items(ann_path: Path) -> Tuple[int, int]:
+    if not ann_path.exists():
+        return 0, 0
+    try:
+        payload = json.loads(ann_path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0, 0
+    images = payload.get("images", []) or []
+    annotations = payload.get("annotations", []) or []
+    return len(images), len(annotations)
 
 
 def ingest_labels_inbox(
@@ -263,6 +279,7 @@ def ingest_labels_inbox(
             raw_dir=raw_dir,
             yolo_dir=tmp_yolo_dir,
             labeled_only=True,
+            verbose=False,
         )
 
         # merge YOLO-generated COCO into splits
@@ -378,9 +395,30 @@ def ingest_labels_inbox(
                     # keep ingest non-fatal; training will surface it with a clear error
                     pass
 
+    train_images = 0
+    train_annotations = 0
+    valid_images = 0
+    valid_annotations = 0
+    if not dry_run:
+        train_images, train_annotations = _count_split_items(dataset_dir / "coco" / "train" / "_annotations.coco.json")
+        valid_images, valid_annotations = _count_split_items(dataset_dir / "coco" / "valid" / "_annotations.coco.json")
+
     msg = (
-        f"Ingest complete: coco_jsons={coco_processed}, yolo_labels={yolo_processed}, "
+        f"Ingest complete: task={yolo_task}, coco_jsons={coco_processed}, yolo_labels={yolo_processed}, "
         f"background_images={background_added}, quarantined={quarantined}. "
+        f"Final split counts -> train: {train_images} images / {train_annotations} annotations, "
+        f"valid: {valid_images} images / {valid_annotations} annotations. "
         f"Next: run `python -m rfdetr_training dataset validate -d {dataset_dir} --task {yolo_task}`"
     )
-    return IngestResult(True, msg, coco_processed, yolo_processed, background_added, quarantined)
+    return IngestResult(
+        True,
+        msg,
+        coco_processed,
+        yolo_processed,
+        background_added,
+        quarantined,
+        train_images,
+        train_annotations,
+        valid_images,
+        valid_annotations,
+    )
