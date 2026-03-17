@@ -232,7 +232,7 @@ def _run_tensorrt_inference(
     if lb is not None:
         boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
         if want_masks and masks is not None:
-            masks = [unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h) for m in masks]
+            masks = [unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=float(mt)) for m in masks]
 
     payload = detections_to_json(
         boxes=boxes,
@@ -343,7 +343,7 @@ def _run_onnx_inference(
         if want_masks and masks is not None:
             mapped_masks = []
             for m in masks:
-                mm = unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h)
+                mm = unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=float(mt))
                 mapped_masks.append(mm)
             masks = mapped_masks
 
@@ -441,6 +441,12 @@ def _run_pytorch_inference(
             model.eval()
     except Exception:
         pass
+    try:
+        optimize = getattr(model, "optimize_for_inference", None)
+        if callable(optimize):
+            optimize(compile=False, batch_size=1)
+    except Exception:
+        pass
 
     pil = Image.open(str(image_path)).convert("RGB")
     orig_w, orig_h = int(pil.width), int(pil.height)
@@ -457,52 +463,66 @@ def _run_pytorch_inference(
     else:
         pil_in = pil.resize((target_w, target_h))
 
-    tensor = T.ToTensor()(pil_in).unsqueeze(0).to(device_t)
-
-    out = None
-    last_exc: Optional[Exception] = None
-    for name in ("predict", "infer", "inference", "forward", "detect"):
-        fn = getattr(model, name, None)
-        if not callable(fn):
-            continue
-        try:
-            with torch.inference_mode():
-                out = fn(tensor)
-            break
-        except Exception as e:
-            last_exc = e
-    if out is None:
-        try:
-            with torch.inference_mode():
-                out = model(tensor)  # type: ignore[misc]
-        except Exception as e:
-            last_exc = e
-
-    if out is None:
-        return InferResult(False, None, f"Inference failed: {last_exc}")
-
     st = float(score_thresh) if score_thresh is not None else float(post_cfg.get("score_threshold_default", 0.3))
     mt = float(mask_thresh) if mask_thresh is not None else float(post_cfg.get("mask_threshold_default", 0.5))
     want_masks = task == "seg"
 
-    boxes, scores, labels, masks = parse_model_output_generic(
-        out,
-        img_w=int(target_w),
-        img_h=int(target_h),
-        score_thresh=float(st),
-        want_masks=bool(want_masks),
-        mask_thresh=float(mt),
-        topk=int(topk),
-    )
+    out = None
+    last_exc: Optional[Exception] = None
+    predict_fn = getattr(model, "predict", None)
+    if callable(predict_fn):
+        try:
+            with torch.inference_mode():
+                out = predict_fn(pil, threshold=float(st))
+        except TypeError:
+            try:
+                with torch.inference_mode():
+                    out = predict_fn(pil)
+            except Exception as e:
+                last_exc = e
+        except Exception as e:
+            last_exc = e
 
-    if lb is not None:
-        boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
-        if want_masks and masks is not None:
-            mapped_masks = []
-            for m in masks:
-                mm = unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h)
-                mapped_masks.append(mm)
-            masks = mapped_masks
+    if out is not None:
+        boxes, scores, labels, masks = parse_model_output_generic(
+            out,
+            img_w=int(orig_w),
+            img_h=int(orig_h),
+            score_thresh=float(st),
+            want_masks=bool(want_masks),
+            mask_thresh=float(mt),
+            topk=int(topk),
+        )
+    else:
+        tensor = T.ToTensor()(pil_in).unsqueeze(0).to(device_t)
+        raw_out = None
+        if module is not None:
+            try:
+                with torch.inference_mode():
+                    raw_out = module(tensor)  # type: ignore[misc]
+            except Exception as e:
+                last_exc = e
+        if raw_out is None:
+            return InferResult(False, None, f"Inference failed: {last_exc}")
+
+        boxes, scores, labels, masks = parse_model_output_generic(
+            raw_out,
+            img_w=int(target_w),
+            img_h=int(target_h),
+            score_thresh=float(st),
+            want_masks=bool(want_masks),
+            mask_thresh=float(mt),
+            topk=int(topk),
+        )
+
+        if lb is not None:
+            boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
+            if want_masks and masks is not None:
+                mapped_masks = []
+                for m in masks:
+                    mm = unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=float(mt))
+                    mapped_masks.append(mm)
+                masks = mapped_masks
 
     payload = detections_to_json(
         boxes=boxes,

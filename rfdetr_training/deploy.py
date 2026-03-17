@@ -111,8 +111,20 @@ def unletterbox_xyxy(
     return [x1, y1, x2, y2]
 
 
-def unletterbox_mask(mask_hw: Any, *, lb: Letterbox, orig_w: int, orig_h: int) -> Optional[Any]:
-    """Map a model-input-sized mask back to original image size."""
+def unletterbox_mask(
+    mask_hw: Any,
+    *,
+    lb: Letterbox,
+    orig_w: int,
+    orig_h: int,
+    mask_thresh: float = 0.5,
+) -> Optional[Any]:
+    """Map a model-input-sized mask back to original image size.
+
+    For float masks/logits, keep the soft values through resize and threshold only
+    at the end. This preserves boundaries much better than thresholding at model
+    resolution and then nearest-neighbor upscaling.
+    """
     try:
         import numpy as np
     except Exception:
@@ -130,18 +142,30 @@ def unletterbox_mask(mask_hw: Any, *, lb: Letterbox, orig_w: int, orig_h: int) -
     if m.ndim != 2:
         return None
 
+    is_float_mask = np.issubdtype(m.dtype, np.floating)
+    if is_float_mask:
+        m = m.astype(np.float32, copy=False)
+    else:
+        m = m.astype(np.uint8, copy=False)
+
     # Ensure mask matches the model input size.
     if int(m.shape[1]) != int(lb.target_w) or int(m.shape[0]) != int(lb.target_h):
         try:
             import cv2  # type: ignore
 
-            m = cv2.resize(m.astype("uint8"), (int(lb.target_w), int(lb.target_h)), interpolation=cv2.INTER_NEAREST)
+            interp = cv2.INTER_LINEAR if is_float_mask else cv2.INTER_NEAREST
+            m = cv2.resize(m, (int(lb.target_w), int(lb.target_h)), interpolation=interp)
         except Exception:
             from PIL import Image  # type: ignore
 
-            im = Image.fromarray(m.astype("uint8") * 255)
-            im = im.resize((int(lb.target_w), int(lb.target_h)), resample=Image.NEAREST)
-            m = (np.asarray(im) > 127).astype("uint8")
+            if is_float_mask:
+                im = Image.fromarray(m.astype(np.float32), mode="F")
+                im = im.resize((int(lb.target_w), int(lb.target_h)), resample=Image.BILINEAR)
+                m = np.asarray(im, dtype=np.float32)
+            else:
+                im = Image.fromarray(m.astype("uint8") * 255)
+                im = im.resize((int(lb.target_w), int(lb.target_h)), resample=Image.NEAREST)
+                m = (np.asarray(im) > 127).astype("uint8")
 
     x0 = int(lb.pad_left)
     y0 = int(lb.pad_top)
@@ -152,11 +176,18 @@ def unletterbox_mask(mask_hw: Any, *, lb: Letterbox, orig_w: int, orig_h: int) -
     try:
         import cv2  # type: ignore
 
-        resized = cv2.resize(cropped.astype("uint8"), (int(orig_w), int(orig_h)), interpolation=cv2.INTER_NEAREST)
+        interp = cv2.INTER_LINEAR if is_float_mask else cv2.INTER_NEAREST
+        resized = cv2.resize(cropped, (int(orig_w), int(orig_h)), interpolation=interp)
+        if is_float_mask:
+            return resized >= float(mask_thresh)
         return resized.astype(bool)
     except Exception:
         from PIL import Image  # type: ignore
 
+        if is_float_mask:
+            im = Image.fromarray(cropped.astype(np.float32), mode="F")
+            im = im.resize((int(orig_w), int(orig_h)), resample=Image.BILINEAR)
+            return np.asarray(im, dtype=np.float32) >= float(mask_thresh)
         im = Image.fromarray(cropped.astype("uint8") * 255)
         im = im.resize((int(orig_w), int(orig_h)), resample=Image.NEAREST)
         return (np.asarray(im) > 127)
@@ -276,7 +307,7 @@ def parse_model_output_detr(
                     m0 = _sigmoid_stable(m0)
                 out_masks = []
                 for j in range(int(m0.shape[0])):
-                    out_masks.append(np.asarray(m0[j]) >= float(mask_thresh))
+                    out_masks.append(np.asarray(m0[j]))
         except Exception:
             out_masks = None
 
@@ -361,12 +392,12 @@ def parse_model_output_generic(
                             if mm.ndim == 3 and mm.shape[0] == 1:
                                 mm = mm[0]
                             if mm.ndim == 2:
-                                out_masks.append(mm >= float(mask_thresh))
+                                out_masks.append(mm)
                     else:
                         mm = np.asarray(_tensor_to_numpy(masks))
                         if mm.ndim == 3:
                             for i in range(mm.shape[0]):
-                                out_masks.append(mm[i] >= float(mask_thresh))
+                                out_masks.append(mm[i])
                 except Exception:
                     out_masks = None
 
@@ -445,7 +476,7 @@ def parse_model_output_generic(
                         if mm.ndim == 4 and mm.shape[1] == 1:
                             mm = mm[:, 0]
                         if mm.ndim == 3:
-                            masks_out = [(mm[i] >= float(mask_thresh)) for i in keep_idx if i < mm.shape[0]]
+                            masks_out = [mm[i] for i in keep_idx if i < mm.shape[0]]
                     except Exception:
                         masks_out = None
 
