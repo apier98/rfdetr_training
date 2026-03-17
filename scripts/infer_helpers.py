@@ -33,8 +33,12 @@ def instantiate_model(size: str, num_classes: Optional[int] = None, task: str = 
 
     try:
         if task == "seg":
-            from rfdetr import RFDETRSegPreview
-            return RFDETRSegPreview()
+            from rfdetr import (
+                RFDETRSegNano,
+                RFDETRSegPreview,
+                RFDETRSegSmall,
+                RFDETRSegMedium,
+            )
         else:
             from rfdetr import RFDETRNano, RFDETRSmall, RFDETRBase, RFDETRMedium
     except Exception:
@@ -56,6 +60,17 @@ def instantiate_model(size: str, num_classes: Optional[int] = None, task: str = 
             except TypeError:
                 return cls()
 
+    if task == "seg":
+        if size == "nano":
+            return _ctor(RFDETRSegNano)
+        if size == "small":
+            return _ctor(RFDETRSegSmall)
+        if size == "medium":
+            return _ctor(RFDETRSegMedium)
+        if size == "base":
+            return _ctor(RFDETRSegPreview)
+        raise ValueError(f"Unknown model size: {size}")
+
     if size == "nano":
         return _ctor(RFDETRNano)
     if size == "small":
@@ -65,6 +80,66 @@ def instantiate_model(size: str, num_classes: Optional[int] = None, task: str = 
     if size == "medium":
         return _ctor(RFDETRMedium)
     raise ValueError(f"Unknown model size: {size}")
+
+
+def detect_model_size_from_checkpoint(path: str, checkpoint_key: Optional[str] = None) -> Optional[str]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        try:
+            ckpt = torch.load(path, map_location="cpu")
+        except Exception:
+            return None
+
+    args = ckpt.get("args") if isinstance(ckpt, dict) else None
+    pretrain = str(getattr(args, "pretrain_weights", "") or "").lower()
+    if "seg-nano" in pretrain or "rfdetr-seg-nano" in pretrain:
+        return "nano"
+    if "seg-small" in pretrain or "rfdetr-seg-small" in pretrain:
+        return "small"
+    if "seg-medium" in pretrain or "rfdetr-seg-medium" in pretrain:
+        return "medium"
+    if "seg-preview" in pretrain or "rfdetr-seg-preview" in pretrain:
+        return "base"
+
+    state = None
+    if isinstance(ckpt, dict):
+        if checkpoint_key and checkpoint_key in ckpt:
+            state = ckpt[checkpoint_key]
+        else:
+            for key in ("model_state_dict", "state_dict", "model", "net"):
+                if key in ckpt:
+                    state = ckpt[key]
+                    break
+        if state is None and any(("transformer" in str(k) or "class_embed" in str(k)) for k in ckpt.keys()):
+            state = ckpt
+
+    if isinstance(state, dict):
+        for key, value in state.items():
+            if key == "model.encoder.patch_embed.proj.weight" and hasattr(value, "shape"):
+                shape = tuple(int(x) for x in value.shape)
+                if len(shape) == 4:
+                    if shape[0] == 384:
+                        return "nano"
+                    if shape[0] == 512:
+                        return "small"
+                    if shape[0] == 768:
+                        return "medium"
+    return None
+
+
+def read_checkpoint_args(path: str) -> Optional[object]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return None
+    if isinstance(ckpt, dict):
+        return ckpt.get("args")
+    return None
 
 
 def detect_num_classes_from_checkpoint(path: str, checkpoint_key: Optional[str] = None, verbose: bool = False) -> Optional[int]:

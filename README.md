@@ -122,6 +122,7 @@ The `scripts/` folder also contains standalone utilities that are useful during 
 
 - `scripts/infer_image.py`: run inference on a single image and visualize/inspect outputs
 - `scripts/infer_webcam.py`: run webcam/live inference
+- `scripts/infer_video.py`: run inference on a video file, draw overlays, and optionally save the result
 - `scripts/batch_infer.py`: run inference over a folder of images
 - `scripts/visualize_annotations.py`: visualize COCO annotations
 - `scripts/commit_from_staging.py`: merge labeled COCO from `staging/` into a dataset split
@@ -131,6 +132,10 @@ The `scripts/` folder also contains standalone utilities that are useful during 
 - `scripts/expand_checkpoint_head.py`: experimental checkpoint head expansion (use carefully)
 
 See `docs/TOOLS.md` for notes and recommendations.
+
+Video overlay examples:
+- `python scripts/infer_video.py --video path\\to\\input.mp4 --weights datasets/<UUID>/models/checkpoint_best_total.pth --task detect --output-video runs\\video_detect.mp4`
+- `python scripts/infer_video.py --video path\\to\\input.mp4 --weights datasets/<UUID>/models/checkpoint_best_total.pth --task seg --classes-file datasets/<UUID>/METADATA.json --out-dir runs\\videos`
 
 ## Install (optional)
 
