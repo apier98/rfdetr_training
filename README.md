@@ -25,7 +25,8 @@ Run the CLI from the repo:
 
 1) Create a dataset folder:
 
-- `python -m rfdetr_training dataset create --name "my-dataset" -c monitor`
+- `python -m rfdetr_training dataset create --name "my-dataset" -c monitor -c keyboard` (use multiple `-c` for multiple classes)
+- Or use a file: `python -m rfdetr_training dataset create --name "my-dataset" --classes-file classes.txt` (one class name per line)
 
 2) Put images in `datasets/<UUID>/raw/` and YOLO labels in `datasets/<UUID>/yolo/` (optional).
 
