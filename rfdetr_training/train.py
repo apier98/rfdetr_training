@@ -188,7 +188,11 @@ def _write_deployment_bundle(out_dir: Path, dataset_dir: Path, cfg: TrainConfig,
             "input_layout": "NCHW",
             "input_dtype": "float32",
             "input_range": "0..1",
-            "note": "PIL RGB -> torchvision.transforms.ToTensor(); resize uses letterbox to preserve aspect ratio.",
+            "normalize": {
+                "mean": [0.485, 0.456, 0.406],
+                "std": [0.229, 0.224, 0.225],
+            },
+            "note": "PIL RGB -> float32 0..1 -> ImageNet mean/std normalization; resize uses letterbox to preserve aspect ratio.",
         }
         (out_dir / "preprocess.json").write_text(json.dumps(preprocess, indent=2), encoding="utf-8")
 

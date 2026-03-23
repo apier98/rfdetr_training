@@ -9,6 +9,7 @@ from .deploy import (
     detections_to_json,
     letterbox_pil,
     load_bundle_config,
+    normalize_image_nchw,
     parse_model_output_generic,
     unletterbox_mask,
     unletterbox_xyxy,
@@ -159,6 +160,7 @@ def _run_tensorrt_inference(
 
     arr = np.asarray(pil_in, dtype=np.float32) / 255.0
     arr = np.transpose(arr, (2, 0, 1))[None, ...]
+    arr = normalize_image_nchw(arr)
     arr = np.ascontiguousarray(arr.astype(input_meta["dtype"], copy=False))
 
     host_buffers: Dict[str, Any] = {}
@@ -316,6 +318,7 @@ def _run_onnx_inference(
 
     arr = np.asarray(pil_in, dtype=np.float32) / 255.0
     arr = np.transpose(arr, (2, 0, 1))[None, ...]
+    arr = normalize_image_nchw(arr).astype(np.float32, copy=False)
 
     try:
         output_names = [out.name for out in session.get_outputs()]
@@ -574,6 +577,7 @@ class InferenceEngine:
         self.weights_path = weights_path.expanduser().resolve() if weights_path else (self.bundle_dir / "checkpoint.pth")
         
         self.session = None
+        self.model_wrapper = None
         self.model = None
         self.engine = None
         self.active_backend = None
@@ -633,6 +637,7 @@ class InferenceEngine:
             
             self.device = torch.device(self.device_str if self.device_str else ("cuda" if torch.cuda.is_available() else "cpu"))
             model_obj = _instantiate_model(self.task, str(self.model_cfg.get("size") or "nano"), len(self.class_names) or None)
+            self.model_wrapper = model_obj
             module = _unwrap_for_inference(model_obj)
             
             lr = load_checkpoint_weights(
@@ -645,6 +650,7 @@ class InferenceEngine:
                 verbose=False
             )
             if lr.replacement_model is not None:
+                self.model_wrapper = lr.replacement_model
                 self.model = _unwrap_for_inference(lr.replacement_model)
             else:
                 self.model = module
@@ -711,6 +717,7 @@ class InferenceEngine:
 
         arr = np.asarray(pil_in, dtype=np.float32) / 255.0
         arr = np.transpose(arr, (2, 0, 1))[None, ...].astype(np.float32)
+        arr = normalize_image_nchw(arr).astype(np.float32, copy=False)
         arr = np.ascontiguousarray(arr)
 
         # Simplified TensorRT execution for speed (reusing buffers if possible, but for now just allocate)
@@ -775,6 +782,7 @@ class InferenceEngine:
 
         arr = np.asarray(pil_in, dtype=np.float32) / 255.0
         arr = np.transpose(arr, (2, 0, 1))[None, ...].astype(np.float32)
+        arr = normalize_image_nchw(arr).astype(np.float32, copy=False)
 
         output_names = [out.name for out in self.session.get_outputs()]
         raw_outputs = self.session.run(output_names, {inputs[0].name: arr})
@@ -798,8 +806,9 @@ class InferenceEngine:
 
         want_masks = self.task == "seg"
         
-        # Try predict method first
-        predict_fn = getattr(self.model, "predict", None)
+        # Prefer the wrapper's official predict() path when available.
+        predict_owner = self.model_wrapper if self.model_wrapper is not None else self.model
+        predict_fn = getattr(predict_owner, "predict", None)
         if callable(predict_fn):
             try:
                 with torch.inference_mode():
@@ -817,7 +826,9 @@ class InferenceEngine:
             except Exception:
                 pass
 
-        tensor = T.ToTensor()(pil_in).unsqueeze(0).to(self.device)
+        tensor = T.ToTensor()(pil_in).unsqueeze(0)
+        tensor = T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))(tensor[0]).unsqueeze(0)
+        tensor = tensor.to(self.device)
         with torch.inference_mode():
             out = self.model(tensor)
         

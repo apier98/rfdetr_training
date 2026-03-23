@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
 
 @dataclass(frozen=True)
 class Letterbox:
@@ -53,6 +56,19 @@ def _sigmoid_stable(x):
     exp_x = np.exp(x[neg])
     out[neg] = exp_x / (1.0 + exp_x)
     return out
+
+
+def normalize_image_nchw(image_nchw: Any) -> Any:
+    """Apply the same ImageNet normalization RF-DETR uses during training."""
+    try:
+        import numpy as np
+    except Exception:
+        return image_nchw
+
+    arr = np.asarray(image_nchw, dtype=np.float32)
+    mean = np.asarray(IMAGENET_MEAN, dtype=np.float32).reshape(1, 3, 1, 1)
+    std = np.asarray(IMAGENET_STD, dtype=np.float32).reshape(1, 3, 1, 1)
+    return (arr - mean) / std
 
 
 def letterbox_pil(pil, *, target_w: int, target_h: int, fill: Tuple[int, int, int] = (114, 114, 114)) -> Tuple[Any, Letterbox]:

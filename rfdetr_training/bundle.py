@@ -557,6 +557,11 @@ def create_bundle(
         "input_layout": "NCHW",
         "input_dtype": "float32",
         "input_range": "0..1",
+        "normalize": {
+            "mean": [0.485, 0.456, 0.406],
+            "std": [0.229, 0.224, 0.225],
+        },
+        "note": "Input contract: RGB -> float32 0..1 -> ImageNet mean/std normalization -> model forward.",
     }
     _write_json(bundle_dir / "preprocess.json", preprocess)
 
