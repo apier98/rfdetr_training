@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Union
 from .model_factory import instantiate_rfdetr_model
 from .deploy import (
     detections_to_json,
+    filter_known_class_detections,
     letterbox_pil,
     load_bundle_config,
     normalize_image_nchw,
@@ -850,6 +851,14 @@ class InferenceEngine:
             boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
             if want_masks and masks is not None:
                 masks = [unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=self.mask_thresh) for m in masks]
+
+        boxes, scores, labels, masks = filter_known_class_detections(
+            boxes=boxes,
+            scores=scores,
+            labels=labels,
+            class_names=self.class_names,
+            masks=masks,
+        )
 
         payload = detections_to_json(
             boxes=boxes,

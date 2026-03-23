@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from rfdetr_training.deploy import detections_to_json, load_bundle_config
+from rfdetr_training.deploy import detections_to_json, filter_known_class_detections, load_bundle_config
 from rfdetr_training.infer import infer_from_bundle
 
 
@@ -302,6 +302,14 @@ def main() -> int:
             scores = [scores[i] for i in keep_masks]
             labels = [labels[i] for i in keep_masks]
             masks = [masks[i] for i in keep_masks]
+
+        boxes, scores, labels, masks = filter_known_class_detections(
+            boxes=boxes,
+            scores=scores,
+            labels=labels,
+            class_names=class_names,
+            masks=masks,
+        )
             
         return res, (boxes, scores, labels, masks)
 

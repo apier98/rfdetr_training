@@ -71,6 +71,32 @@ def normalize_image_nchw(image_nchw: Any) -> Any:
     return (arr - mean) / std
 
 
+def filter_known_class_detections(
+    *,
+    boxes: List[List[float]],
+    scores: List[float],
+    labels: List[int],
+    class_names: Optional[List[str]],
+    masks: Optional[List[Any]] = None,
+) -> Tuple[List[List[float]], List[float], List[int], Optional[List[Any]]]:
+    """Drop detections whose label index falls outside the known dataset classes."""
+    if not class_names:
+        return boxes, scores, labels, masks
+
+    ncls = int(len(class_names))
+    keep = [i for i, lid in enumerate(labels) if 0 <= int(lid) < ncls]
+    if len(keep) == len(labels):
+        return boxes, scores, labels, masks
+
+    boxes_f = [boxes[i] for i in keep]
+    scores_f = [scores[i] for i in keep]
+    labels_f = [labels[i] for i in keep]
+    masks_f = None
+    if masks is not None:
+        masks_f = [masks[i] for i in keep if i < len(masks)]
+    return boxes_f, scores_f, labels_f, masks_f
+
+
 def letterbox_pil(pil, *, target_w: int, target_h: int, fill: Tuple[int, int, int] = (114, 114, 114)) -> Tuple[Any, Letterbox]:
     """Resize to fit inside (target_w,target_h) and pad (keep aspect ratio)."""
     from PIL import Image  # type: ignore
