@@ -13,7 +13,8 @@ Integrated system for defect detection models, from dataset preparation to train
 - Normalize COCO category ids to contiguous `0..N-1` (fixes common training issues)
 - Train defect detection models (detect or seg)
 - Export trained models to ONNX (and optionally build TensorRT engines)
-- Create portable deployment bundles
+- Create deployment bundles compatible with ARIA MoldPilot (`.mpk` format, versioned, checksummed)
+- Pre-label new images with a trained model via Label Studio (active learning loop)
 - Store persistent defaults (dataset root, num-workers, backend, export format)
 - Run `doctor` to check your environment and print common fix hints
 
@@ -198,48 +199,99 @@ moldvision export -d datasets/<UUID> -w ... --format tensorrt --fp16
 
 > Tip: export is `--strict` by default (fails fast on mismatched checkpoints). Use `--non-strict` only for debugging.
 
-## Deployment Bundle (portable)
+## Deployment Bundle (ARIA MoldPilot compatible)
 
-Creates a self-contained folder containing: `model.onnx`, `checkpoint.pth`, `classes.json`, `model_config.json`,
-`preprocess.json`, `postprocess.json`, `bundle_manifest.json`, `requirements.txt`,
-`requirements-pytorch-fallback.txt`, and a standalone `infer.py` runner.
+Creates a folder containing: `manifest.json` (versioned, with SHA-256 checksums),
+`model.onnx`, `preprocess.json`, `postprocess.json`, `classes.json`, `model_config.json`,
+and `checkpoint.pth`. The bundle installs directly into ARIA MoldPilot via `install_bundle()`.
 
 ```powershell
-# Recommended — produces ONNX from the portable checkpoint + zips the bundle
-moldvision bundle -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_portable.pth --zip
+# Recommended — MoldPilot-ready bundle with .mpk archive
+moldvision bundle `
+  -d datasets/<UUID> `
+  -w datasets/<UUID>/models/checkpoint_portable.pth `
+  --model-name "Surface Defect Detector" `
+  --model-version 1.0.0 `
+  --mpk
+
+# Version bump — supersedes a previous bundle
+moldvision bundle `
+  -d datasets/<UUID> -w ... `
+  --model-version 1.1.0 `
+  --supersedes surface-defect-detector-v1.0.0 `
+  --mpk
+
+# Beta / staged rollout
+moldvision bundle -d datasets/<UUID> -w ... --model-version 2.0.0 --channel beta --mpk
 
 # Include INT8 quantized model
-moldvision bundle -d datasets/<UUID> -w ... --export onnx_quantized
+moldvision bundle -d datasets/<UUID> -w ... --export onnx_quantized --mpk
 
-# Include FP16 model
-moldvision bundle -d datasets/<UUID> -w ... --export onnx_fp16
+# Include FP16 model (GPU inference)
+moldvision bundle -d datasets/<UUID> -w ... --export onnx_fp16 --mpk
 
 # Include TensorRT engine (requires trtexec on PATH)
-moldvision bundle -d datasets/<UUID> -w ... --export tensorrt
+moldvision bundle -d datasets/<UUID> -w ... --export tensorrt --mpk
+
+# Standalone bundle with Python runner (for use without MoldPilot)
+moldvision bundle -d datasets/<UUID> -w ... --standalone --zip
 ```
 
-### Inference hierarchy
+**Key flags:**
 
-The `infer.py` runner selects the best available model automatically:
+| Flag | Default | Description |
+|---|---|---|
+| `--model-name` | dataset name | Human-readable name shown in MoldPilot |
+| `--model-version` | `1.0.0` | Semantic version string |
+| `--channel` | `stable` | `stable` or `beta` |
+| `--supersedes` | — | `bundle_id` of the version this replaces |
+| `--min-app-version` | `0.0.0` | Minimum MoldPilot version required |
+| `--mpk` | off | Write `<bundle>.mpk` (MoldPilot install format) |
+| `--zip` | off | Write `<bundle>.zip` |
+| `--standalone` | off | Add `infer.py`, `requirements.txt`, vendored package |
 
-1. **TensorRT** (`model.engine`) — fastest (GPU only)
-2. **INT8 ONNX** (`model_quantized.onnx`) — smallest, fast on CPU/NPU
-3. **FP16 ONNX** (`model_fp16.onnx`) — fast on modern GPUs
-4. **FP32 ONNX** (`model.onnx`) — baseline compatibility
-5. **PyTorch Checkpoint** (`checkpoint.pth`) — slowest fallback
+The `bundle_id` is auto-generated as `{model-name}-v{version}` if not provided via `--bundle-id`.
 
-Force a specific backend: `--backend {tensorrt,onnx,pytorch}`, or set a persistent default with `moldvision config set inference-backend onnx`.
+> See `docs/BUNDLE_CONTRACT.md` for the full manifest schema, MoldPilot install API,
+> and the remote update design (server-side index.json contract).
+
+### Smoke-test a bundle with `moldvision infer`
 
 ```powershell
-# Inside the bundle folder:
-pip install -r requirements.txt
-python infer.py --image path\to\image.jpg --out-json out.json --out-image out.png
-
-# Segmentation extras:
-python infer.py --image path\to\image.jpg --mask-thresh 0.5 --mask-alpha 0.4 --out-image out.png
+moldvision infer --bundle-dir datasets/<UUID>/deploy/<bundle> --image path\to\test.jpg
 ```
 
-> If weights-only extraction fails during bundling, the build stops by default. Use `--allow-raw-checkpoint-fallback` only for debug scenarios.
+## Pre-labeling with Label Studio (active learning)
+
+Use a trained MoldVision model to pre-annotate new images in Label Studio.
+Annotators see model predictions as a starting point and only need to correct
+mistakes — typically 60–80 % faster than labeling from scratch.
+
+**Install:**
+```powershell
+pip install label-studio
+pip install "aria-moldvision[label-studio]"
+```
+
+**Start the pre-labeling backend:**
+```powershell
+$env:MOLDVISION_BUNDLE_DIR = "datasets/<UUID>/deploy/<bundle>"
+label-studio-ml start moldvision\label_studio_backend.py --port 9090
+```
+
+**Then in Label Studio:**
+1. Create a project with the appropriate label config (bounding boxes for detect, add `PolygonLabels` for seg).
+2. **Settings → Machine Learning → Add Model** → `http://localhost:9090`.
+3. Import new unlabeled images — pre-annotations appear automatically.
+4. Review, correct, export COCO JSON, ingest into your dataset, retrain.
+
+The backend supports both detect (`rectanglelabels`) and seg (`polygonlabels`) bundles
+and auto-discovers tag names from your project's label config — no hardcoding needed.
+
+Override the confidence threshold at start time: `--with score_threshold=0.7`
+
+> See `docs/LABELING_WORKFLOW.md` for the complete step-by-step guide including
+> COCO export, dataset ingest, and the full active learning loop.
 
 ## Tools (optional scripts)
 
@@ -267,6 +319,15 @@ python scripts/infer_video.py --video path\to\input.mp4 `
 ```
 
 See `docs/TOOLS.md` for notes and recommendations.
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| `docs/TOOLS.md` | Notes on optional scripts and inference utilities |
+| `docs/TRANSFER_AND_INFERENCE.md` | Model transfer and inference workflow notes |
+| `docs/BUNDLE_CONTRACT.md` | Bundle format spec, `manifest.json` schema, MoldPilot integration, remote update design |
+| `docs/LABELING_WORKFLOW.md` | Full Label Studio active-learning loop: pre-label → review → export → retrain |
 
 ## Dependencies
 
