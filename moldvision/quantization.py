@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 from .pathutil import resolve_path
@@ -12,6 +13,29 @@ try:
     import onnxruntime.quantization as oq  # type: ignore
 except ImportError:
     oq = None
+
+
+def _letterbox_to_array(img: Image.Image, target_h: int, target_w: int) -> np.ndarray:
+    """Resize with letterboxing (pad to square), normalize with ImageNet stats.
+
+    Matches RF-DETR's inference preprocessing so calibration activations are
+    representative of real deployment inputs.
+    """
+    iw, ih = img.size
+    scale = min(target_w / iw, target_h / ih)
+    nw, nh = int(iw * scale), int(ih * scale)
+    resized = img.resize((nw, nh), resample=Image.BILINEAR)
+
+    canvas = Image.new("RGB", (target_w, target_h), (114, 114, 114))
+    pad_x = (target_w - nw) // 2
+    pad_y = (target_h - nh) // 2
+    canvas.paste(resized, (pad_x, pad_y))
+
+    arr = np.asarray(canvas, dtype=np.float32) / 255.0
+    arr = np.transpose(arr, (2, 0, 1))  # HWC -> CHW
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+    return (arr - mean) / std
 
 
 class CalibrationDataReader:
@@ -43,18 +67,8 @@ class CalibrationDataReader:
         batch_data = []
         for p in batch_paths:
             try:
-                # Preprocess matches rfdetr standard: RGB -> Resize/Letterbox -> 0..1 -> Normalize
-                # Simplified resize for calibration (non-letterbox is usually fine for calib)
                 img = Image.open(str(p)).convert("RGB")
-                img = img.resize((self.target_w, self.target_h), resample=Image.BILINEAR)
-                arr = np.asarray(img, dtype=np.float32) / 255.0
-                arr = np.transpose(arr, (2, 0, 1)) # HWC -> CHW
-                
-                # Normalize (ImageNet mean/std)
-                mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
-                std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
-                arr = (arr - mean) / std
-                
+                arr = _letterbox_to_array(img, self.target_h, self.target_w)
                 batch_data.append(arr)
             except Exception as e:
                 print(f"Warning: Calibration skipped corrupted image {p}: {e}")
@@ -63,7 +77,6 @@ class CalibrationDataReader:
         if not batch_data:
             return self.get_next()
 
-        # Add batch dimension
         data = np.stack(batch_data, axis=0).astype(np.float32)
         return {self.input_name: data}
 
@@ -80,6 +93,7 @@ def quantize_onnx_model(
     target_w: int = 640,
     opset: int = 18,
     verbose: bool = False,
+    seed: int = 42,
 ) -> bool:
     """Quantize an ONNX model to INT8 (static or dynamic)."""
     if oq is None:
@@ -91,41 +105,45 @@ def quantize_onnx_model(
     if calibration_data and len(calibration_data) > 0:
         if verbose:
             print(f"Performing STATIC quantization with {len(calibration_data)} images.")
-        
-        # We need to find the input name. 
-        # For RF-DETR it's usually "images".
-        import onnx
+
+        # Shuffle so calibration covers the class distribution, not just the
+        # first N images (which may be sorted by class or capture time).
+        shuffled = list(calibration_data)
+        random.Random(seed).shuffle(shuffled)
+
+        import onnx  # type: ignore
         model = onnx.load(str(model_path))
         input_name = model.graph.input[0].name
-        
+
         dr = CalibrationDataReader(
-            image_paths=calibration_data,
+            image_paths=shuffled,
             input_name=input_name,
             target_h=target_h,
             target_w=target_w,
         )
-        
+
         oq.quantize_static(
             model_input=str(model_path),
             model_output=str(output_path),
             calibration_data_reader=dr,
-            op_types_to_quantize=None, # All supported
-            per_channel=True,
-            reduce_range=False, # Use False for x86; can be True for some older ARM
-            activation_type=oq.QuantType.QUInt8,
-            weight_type=oq.QuantType.QInt8,
-            # extra_options={"ActivationSymmetric": True} # Optional
-        )
-    else:
-        if verbose:
-            print("Performing DYNAMIC quantization (no calibration data).")
-        oq.quantize_dynamic(
-            model_input=str(model_path),
-            model_output=str(output_path),
+            op_types_to_quantize=None,  # all supported op types
             per_channel=True,
             reduce_range=False,
             activation_type=oq.QuantType.QUInt8,
             weight_type=oq.QuantType.QInt8,
         )
+    else:
+        if verbose:
+            print("Performing DYNAMIC quantization (no calibration data).")
+        # quantize_dynamic only supports weight_type; activation quantization
+        # happens at runtime and cannot be specified here.
+        oq.quantize_dynamic(
+            model_input=str(model_path),
+            model_output=str(output_path),
+            per_channel=True,
+            reduce_range=False,
+            weight_type=oq.QuantType.QInt8,
+        )
 
     return output_path.exists()
+

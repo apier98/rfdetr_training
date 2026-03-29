@@ -256,6 +256,32 @@ def _try_write_portable_checkpoint(out_dir: Path, *, checkpoint_key: Optional[st
         print(f"Warning: could not write portable checkpoint ({dst}): {e}", file=sys.stderr)
 
 
+def _cleanup_redundant_checkpoints(out_dir: Path) -> None:
+    """Remove sub-metric checkpoints that are superseded once checkpoint_portable.pth exists.
+
+    RF-DETR writes checkpoint_best_ema.pth and checkpoint_best_regular.pth as
+    per-metric trackers during training.  After checkpoint_best_total.pth is
+    produced (the winner of those two) and checkpoint_portable.pth is extracted
+    from it, the sub-metric files add no further value while consuming several
+    hundred MB each.
+
+    This function is a no-op when checkpoint_portable.pth is absent (i.e. the
+    portable write failed), so the originals are always preserved on error.
+    """
+    if not (out_dir / "checkpoint_portable.pth").exists():
+        return
+
+    for name in ("checkpoint_best_ema.pth", "checkpoint_best_regular.pth"):
+        p = out_dir / name
+        if not p.exists():
+            continue
+        try:
+            p.unlink()
+            print(f"Removed redundant checkpoint: {name}")
+        except Exception as exc:
+            print(f"Warning: could not remove {name}: {exc}", file=sys.stderr)
+
+
 class _PatchedInferenceMode:
     def __init__(self, enabled: bool):
         self.enabled = enabled
@@ -577,5 +603,6 @@ def train(cfg: TrainConfig) -> int:
     print(f"Training finished. Outputs in: {out_dir}")
     _write_deployment_bundle(out_dir, dataset_dir, cfg, md)
     _try_write_portable_checkpoint(out_dir, checkpoint_key=cfg.checkpoint_key)
+    _cleanup_redundant_checkpoints(out_dir)
     _summarize_training_outputs(out_dir)
     return 0

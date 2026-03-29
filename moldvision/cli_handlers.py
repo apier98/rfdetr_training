@@ -785,10 +785,18 @@ def handle_bundle(args) -> int:
         allow_raw_checkpoint_fallback=bool(args.allow_raw_checkpoint_fallback),
         include_raw_checkpoint=bool(args.include_raw_checkpoint),
         make_zip=bool(args.zip),
+        make_mpk=bool(args.mpk),
         overwrite=bool(args.overwrite),
         quantize=bool(args.quantize),
         calibration_split=args.calibration_split,
         calibration_count=int(args.calibration_count),
+        bundle_id=args.bundle_id,
+        model_name=args.model_name,
+        model_version=args.model_version,
+        channel=args.channel,
+        supersedes=args.supersedes,
+        min_app_version=args.min_app_version,
+        standalone=bool(args.standalone),
     )
     if not res.ok:
         print(f"Error: {res.message}", file=sys.stderr)

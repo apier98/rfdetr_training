@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import shutil
 import sys
@@ -85,6 +86,24 @@ def _package_version(dist_name: str) -> Optional[str]:
         return None
 
 
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _compute_checksums(bundle_dir: Path, *, exclude: Optional[Sequence[str]] = None) -> Dict[str, str]:
+    """Return SHA-256 hex digests for every file directly in *bundle_dir*, keyed by filename."""
+    skip = set(exclude or [])
+    result: Dict[str, str] = {}
+    for p in sorted(bundle_dir.iterdir()):
+        if p.is_file() and p.name not in skip:
+            result[p.name] = _sha256_file(p)
+    return result
+
+
 def _bundle_runtime_versions() -> Dict[str, Optional[str]]:
     return {
         "python": sys.version.split()[0],
@@ -135,344 +154,7 @@ def _bundle_pytorch_fallback_requirements_text(runtime_versions: Dict[str, Optio
     return "\n".join(lines)
 
 
-_INFER_SCRIPT = r"""#!/usr/bin/env python3
-from __future__ import annotations
 
-import argparse
-import json
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import torch
-import torchvision.transforms as T
-from PIL import Image, ImageDraw, ImageFont
-
-
-def _read_json(path: Path) -> Dict[str, Any]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def load_bundle(bundle_dir: Path) -> Dict[str, Any]:
-    bundle_dir = resolve_path(bundle_dir)
-    cfg = {
-        "bundle_dir": str(bundle_dir),
-        "model_config": _read_json(bundle_dir / "model_config.json"),
-        "preprocess": _read_json(bundle_dir / "preprocess.json"),
-        "postprocess": _read_json(bundle_dir / "postprocess.json"),
-        "classes": _read_json(bundle_dir / "classes.json"),
-    }
-    return cfg
-
-
-def letterbox(pil: Image.Image, target_w: int, target_h: int, fill=(114, 114, 114)) -> Tuple[Image.Image, Dict[str, Any]]:
-    w, h = int(pil.width), int(pil.height)
-    scale = min(float(target_w) / float(w), float(target_h) / float(h))
-    new_w = max(1, int(round(w * scale)))
-    new_h = max(1, int(round(h * scale)))
-    resized = pil.resize((new_w, new_h), resample=Image.BILINEAR)
-    canvas = Image.new("RGB", (int(target_w), int(target_h)), color=fill)
-    pad_left = int((target_w - new_w) // 2)
-    pad_top = int((target_h - new_h) // 2)
-    canvas.paste(resized, (pad_left, pad_top))
-    info = {
-        "target_w": int(target_w),
-        "target_h": int(target_h),
-        "new_w": int(new_w),
-        "new_h": int(new_h),
-        "pad_left": int(pad_left),
-        "pad_top": int(pad_top),
-        "scale": float(scale),
-        "orig_w": int(w),
-        "orig_h": int(h),
-    }
-    return canvas, info
-
-
-def unletterbox_xyxy(b: List[float], info: Dict[str, Any]) -> List[float]:
-    x1, y1, x2, y2 = [float(v) for v in b]
-    pad_left = float(info["pad_left"])
-    pad_top = float(info["pad_top"])
-    scale = float(info["scale"])
-    x1 = (x1 - pad_left) / scale
-    y1 = (y1 - pad_top) / scale
-    x2 = (x2 - pad_left) / scale
-    y2 = (y2 - pad_top) / scale
-    ow = int(info["orig_w"])
-    oh = int(info["orig_h"])
-    x1 = max(0.0, min(x1, float(max(0, ow - 1))))
-    y1 = max(0.0, min(y1, float(max(0, oh - 1))))
-    x2 = max(0.0, min(x2, float(max(0, ow - 1))))
-    y2 = max(0.0, min(y2, float(max(0, oh - 1))))
-    return [x1, y1, x2, y2]
-
-
-def instantiate_model(task: str, size: str, num_classes: Optional[int]):
-    model, _, _ = instantiate_rfdetr_model(task, size, num_classes=num_classes, pretrain_weights=None)
-    return model
-
-
-def load_weights(model: Any, weights_path: Path, device: torch.device, *, use_checkpoint_model: bool, checkpoint_key: Optional[str], strict: bool) -> Any:
-    ckpt = None
-    try:
-        ckpt = torch.load(str(weights_path), map_location=device)
-    except Exception:
-        try:
-            ckpt = torch.load(str(weights_path), map_location=device, weights_only=False)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load checkpoint: {e}")
-
-    if use_checkpoint_model and isinstance(ckpt, dict):
-        for cand in ("ema_model", "model"):
-            if cand in ckpt and hasattr(ckpt[cand], "state_dict"):
-                if strict:
-                    raise RuntimeError("strict=True disallows using pickled checkpoint model objects")
-                return ckpt[cand]
-
-    state = None
-    if isinstance(ckpt, dict):
-        if checkpoint_key and checkpoint_key in ckpt and isinstance(ckpt[checkpoint_key], dict):
-            state = ckpt[checkpoint_key]
-        else:
-            for key in ("model_state_dict", "state_dict", "model", "net"):
-                if key in ckpt and isinstance(ckpt[key], dict):
-                    state = ckpt[key]
-                    break
-        if state is None and any(k.startswith("transformer") or k.startswith("backbone") or "class_embed" in str(k) for k in ckpt.keys()):
-            state = ckpt
-
-    if not isinstance(state, dict):
-        # best effort wrapper
-        if hasattr(model, "load"):
-            model.load(str(weights_path))
-            return model
-        raise RuntimeError("Could not find a state_dict in checkpoint")
-
-    # pick load target
-    target = model
-    if not hasattr(target, "load_state_dict"):
-        for attr in ("model", "net", "network", "module", "detector", "backbone", "transformer"):
-            inner = getattr(model, attr, None)
-            if inner is not None and hasattr(inner, "load_state_dict"):
-                target = inner
-                break
-
-    if strict:
-        target.load_state_dict(state, strict=True)
-    else:
-        try:
-            tgt_state = target.state_dict()
-            filtered = {k: v for k, v in state.items() if k in tgt_state and getattr(v, "shape", None) == getattr(tgt_state[k], "shape", None)}
-        except Exception:
-            filtered = state
-        target.load_state_dict(filtered, strict=False)
-    try:
-        target.to(device)
-    except Exception:
-        pass
-    return model
-
-
-def run_inference(model: Any, tensor: torch.Tensor):
-    # Prefer an explicit inference method if present.
-    for name in ("predict", "infer", "inference", "forward", "detect"):
-        fn = getattr(model, name, None)
-        if callable(fn):
-            return fn(tensor)
-    if callable(model):
-        return model(tensor)
-    raise RuntimeError("Model is not callable and has no predict/infer method")
-
-
-def parse_detections(out: Any, *, model_w: int, model_h: int, score_thresh: float, topk: int) -> Tuple[List[List[float]], List[float], List[int]]:
-    # decoded dict: boxes/scores/labels
-    if isinstance(out, dict) and "boxes" in out:
-        b = out.get("boxes")
-        s = out.get("scores")
-        l = out.get("labels") or out.get("classes")
-        if isinstance(b, torch.Tensor):
-            b = b.detach().cpu()
-            if b.numel() == 0:
-                return [], [], []
-            if s is None:
-                s = torch.ones((b.shape[0],))
-            else:
-                s = s.detach().cpu()
-            if l is None:
-                l = torch.zeros((b.shape[0],), dtype=torch.int64)
-            else:
-                l = l.detach().cpu().long()
-
-            boxes: List[List[float]] = []
-            scores: List[float] = []
-            labels: List[int] = []
-            for i in range(int(b.shape[0])):
-                sc = float(s[i].item())
-                if sc < float(score_thresh):
-                    continue
-                boxes.append([float(x) for x in b[i].tolist()])
-                scores.append(sc)
-                labels.append(int(l[i].item()))
-            return boxes, scores, labels
-
-    # DETR raw dict: pred_logits/pred_boxes
-    if isinstance(out, dict) and "pred_logits" in out and "pred_boxes" in out:
-        logits = out["pred_logits"]
-        boxes = out["pred_boxes"]
-        if isinstance(logits, torch.Tensor) and logits.ndim == 3:
-            logits = logits[0]
-        if isinstance(boxes, torch.Tensor) and boxes.ndim == 3:
-            boxes = boxes[0]
-        if not isinstance(logits, torch.Tensor) or not isinstance(boxes, torch.Tensor):
-            return [], [], []
-        probs = logits.sigmoid()
-        flat = probs.reshape(-1)
-        if flat.numel() == 0:
-            return [], [], []
-        k = int(topk) if int(topk) > 0 else int(flat.numel())
-        k = min(k, int(flat.numel()))
-        scores_k, topk_indexes = torch.topk(flat, k, dim=0)
-        keep = scores_k >= float(score_thresh)
-        if not bool(keep.any()):
-            return [], [], []
-        scores_k = scores_k[keep]
-        topk_indexes = topk_indexes[keep]
-        labels_k = topk_indexes % logits.shape[-1]
-        box_idxs = torch.div(topk_indexes, logits.shape[-1], rounding_mode="floor")
-        boxes_k = boxes[box_idxs]
-        order = torch.argsort(scores_k, descending=True)
-        scores_k = scores_k[order]
-        labels_k = labels_k[order]
-        boxes_k = boxes_k[order]
-
-        normalized = float(boxes_k.max().item()) <= 1.5
-        out_boxes: List[List[float]] = []
-        out_scores: List[float] = []
-        out_labels: List[int] = []
-        for i in range(int(scores_k.shape[0])):
-            sc = float(scores_k[i].item())
-            lab = int(labels_k[i].item())
-            cx, cy, bw, bh = [float(x) for x in boxes_k[i].detach().cpu().tolist()]
-            if normalized:
-                cx *= float(model_w); cy *= float(model_h); bw *= float(model_w); bh *= float(model_h)
-            x1 = cx - bw / 2.0; y1 = cy - bh / 2.0; x2 = cx + bw / 2.0; y2 = cy + bh / 2.0
-            out_boxes.append([x1, y1, x2, y2])
-            out_scores.append(sc)
-            out_labels.append(lab)
-        return out_boxes, out_scores, out_labels
-
-    return [], [], []
-
-
-def draw_overlay(pil: Image.Image, dets: List[Dict[str, Any]]) -> Image.Image:
-    img = pil.copy()
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.load_default()
-    except Exception:
-        font = None
-    for d in dets:
-        b = d["bbox"]
-        x1, y1, x2, y2 = [float(x) for x in b]
-        draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
-        label = f'{d.get("label_name", d.get("label_id"))}:{float(d.get("score", 0.0)):.2f}'
-        if font is not None:
-            draw.text((x1 + 2, max(0, y1 - 12)), label, fill=(0, 255, 0), font=font)
-        else:
-            draw.text((x1 + 2, max(0, y1 - 12)), label, fill=(0, 255, 0))
-    return img
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description="ARIA_MoldVision: Run inference using a portable deployment bundle")
-    ap.add_argument("--bundle-dir", default=".", help="Bundle directory (contains model.onnx/checkpoint.pth + *config.json)")
-
-    ap.add_argument("--image", "-i", required=True, help="Path to an image")
-    ap.add_argument("--weights", default=None, help="Override weights path (default: bundle/checkpoint.pth)")
-    ap.add_argument("--device", default=None, help="cuda, cuda:0, cpu (default: auto)")
-    ap.add_argument("--threshold", type=float, default=None, help="Override score threshold")
-    ap.add_argument("--out-json", default=None, help="Write detections JSON")
-    ap.add_argument("--out-image", default=None, help="Write overlay image (PNG/JPG)")
-    ap.add_argument("--use-checkpoint-model", action="store_true", help="Allow using a pickled model object from the checkpoint (trusted only)")
-    ap.add_argument("--checkpoint-key", default=None, help="Explicit key containing state_dict inside checkpoint")
-    ap.add_argument("--strict", action="store_true", help="Strict state_dict load (recommended for deployment correctness)")
-    ap.add_argument("--topk", type=int, default=300)
-    args = ap.parse_args()
-
-    bundle_dir = resolve_path(args.bundle_dir)
-    cfg = load_bundle(bundle_dir)
-    model_cfg = cfg.get("model_config", {}) or {}
-    pre_cfg = cfg.get("preprocess", {}) or {}
-    post_cfg = cfg.get("postprocess", {}) or {}
-
-    task = (model_cfg.get("task") or "detect").strip().lower()
-    size = (model_cfg.get("size") or "nano").strip().lower()
-    class_names = cfg.get("classes", []) or []
-    if isinstance(class_names, dict) and "class_names" in class_names:
-        class_names = class_names["class_names"]
-    class_names = list(class_names) if isinstance(class_names, list) else []
-    num_classes = int(len(class_names)) if class_names else None
-
-    tw = int(pre_cfg.get("target_w") or pre_cfg.get("width") or 640)
-    th = int(pre_cfg.get("target_h") or pre_cfg.get("height") or 640)
-    policy = (pre_cfg.get("resize_policy") or pre_cfg.get("policy") or "letterbox").strip().lower()
-
-    device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    weights_path = resolve_path(args.weights) if args.weights else (bundle_dir / "checkpoint.pth")
-    if not weights_path.exists():
-        raise SystemExit(f"Weights not found: {weights_path}")
-
-    model = instantiate_model(task=task, size=size, num_classes=num_classes)
-    model = load_weights(model, weights_path, device, use_checkpoint_model=bool(args.use_checkpoint_model), checkpoint_key=args.checkpoint_key, strict=bool(args.strict))
-    try:
-        model.to(device).eval()
-    except Exception:
-        pass
-
-    pil = Image.open(args.image).convert("RGB")
-    orig = pil
-    if policy == "letterbox":
-        pil, lb = letterbox(pil, tw, th)
-    else:
-        pil = pil.resize((tw, th), resample=Image.BILINEAR)
-        lb = {"orig_w": int(orig.width), "orig_h": int(orig.height), "pad_left": 0, "pad_top": 0, "scale": float(tw) / float(orig.width), "target_w": tw, "target_h": th}
-
-    t = T.ToTensor()(pil).unsqueeze(0).to(device)
-
-    with torch.inference_mode():
-        out = run_inference(model, t)
-
-    thresh = float(args.threshold) if args.threshold is not None else float(post_cfg.get("score_threshold_default", 0.3))
-    boxes, scores, labels = parse_detections(out, model_w=int(tw), model_h=int(th), score_thresh=thresh, topk=int(args.topk))
-    mapped_boxes = [unletterbox_xyxy(b, lb) for b in boxes]
-
-    dets = []
-    for b, s, l in zip(mapped_boxes, scores, labels):
-        lid = int(l)
-        lname = class_names[lid] if class_names and 0 <= lid < len(class_names) else str(lid)
-        dets.append({"bbox": [float(x) for x in b], "score": float(s), "label_id": lid, "label_name": lname})
-    payload = {"image_id": Path(args.image).name, "detections": dets}
-
-    if args.out_json:
-        Path(args.out_json).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"Wrote JSON: {args.out_json}")
-    else:
-        print(json.dumps(payload))
-
-    if args.out_image:
-        over = draw_overlay(orig, dets)
-        Path(args.out_image).parent.mkdir(parents=True, exist_ok=True)
-        over.save(args.out_image)
-        print(f"Wrote overlay: {args.out_image}")
-
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-"""
 
 
 def create_bundle(
@@ -497,10 +179,18 @@ def create_bundle(
     allow_raw_checkpoint_fallback: bool,
     include_raw_checkpoint: bool,
     make_zip: bool,
-    overwrite: bool,
+    make_mpk: bool = False,
+    overwrite: bool = False,
     quantize: bool = False,
     calibration_split: str = "valid",
     calibration_count: int = 100,
+    bundle_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    model_version: str = "1.0.0",
+    channel: str = "stable",
+    supersedes: Optional[str] = None,
+    min_app_version: str = "0.0.0",
+    standalone: bool = False,
 ) -> BundleResult:
     dataset_dir = resolve_path(dataset_dir)
     weights = resolve_path(weights)
@@ -681,73 +371,26 @@ def create_bundle(
         checkpoint_write_mode = "raw_checkpoint"
         checkpoint_write_message = "Portable checkpoint disabled by CLI; copied checkpoint verbatim."
 
-    # Write a self-contained inference runner.
-    runner_path = Path(__file__).with_name("bundle_runner.py")
-    (bundle_dir / "infer.py").write_text(runner_path.read_text(encoding="utf-8"), encoding="utf-8")
-    (bundle_dir / "requirements.txt").write_text(_bundle_requirements_text(runtime_versions), encoding="utf-8")
-    (bundle_dir / "requirements-pytorch-fallback.txt").write_text(
-        _bundle_pytorch_fallback_requirements_text(runtime_versions), encoding="utf-8"
-    )
-
-    # Vendor the minimal source package into the bundle so `python infer.py` works
-    # without requiring `pip install -e .` or setting PYTHONPATH.
-    src_pkg_dir = Path(__file__).resolve().parent
-    dst_pkg_dir = bundle_dir / src_pkg_dir.name
-    try:
-        if not dst_pkg_dir.exists():
-            shutil.copytree(
-                src_pkg_dir,
-                dst_pkg_dir,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
-            )
-    except Exception:
-        # Best-effort: bundle still contains ONNX/TensorRT exports if requested.
-        pass
-    (bundle_dir / "README.md").write_text(
-        "\n".join(
-            [
-                "# Deployment Bundle",
-                "",
-                "This folder is intended to be copied into another project to run inference.",
-                "",
-                "### Usage Examples",
-                "",
-                "**Image Inference:**",
-                "```powershell",
-                "python infer.py --image path\\to\\image.jpg --out-json out.json --out-image out.png",
-                "```",
-                "",
-                "**Video Inference:**",
-                "```powershell",
-                "python infer.py --video path\\to\\video.mp4 --out-video output.mp4 --display",
-                "```",
-                "",
-                "**Webcam Inference:**",
-                "```powershell",
-                "python infer.py --webcam 0 --display",
-                "```",
-                "",
-                "### Options",
-                "- `--backend {auto,tensorrt,onnx,pytorch}`: Force a specific inference backend.",
-                "- `--threshold 0.5`: Override the score threshold.",
-                "- `--display`: Show a window with the results (useful for video/webcam).",
-                "- `--out-video path`: Save the annotated video to a file.",
-                "",
-                "### Notes:",
-                "- Primary shipped model format is ONNX (`model.onnx`). If `model_quantized.onnx` or `model_fp16.onnx` is present, it will be preferred by default.",
-                "- If `model.engine` is also present and TensorRT runtime is available, `infer.py` will try TensorRT first and fall back to ONNX automatically.",
-                "- Preprocess keeps aspect ratio (letterbox) per `preprocess.json`.",
-                "- This bundle includes a vendored copy of the `moldvision` package so `infer.py` can run without installing this repo.",
-                "- Install the primary runtime with `pip install -r requirements.txt`.",
-                "- Install `requirements-pytorch-fallback.txt` only if you need checkpoint-based fallback inference.",
-                "- TensorRT runtime is optional and environment-specific; if it is unavailable, bundle inference falls back to ONNX automatically.",
-                "- `checkpoint.pth` is included as a secondary fallback/debug artifact, not the primary shipping format.",
-                "- If `bundle_manifest.json` reports `checkpoint.mode=copied_fallback` or `raw_checkpoint`, the fallback checkpoint path may require unsafe checkpoint loading behavior and should be treated as trusted/debug only.",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    # Write a self-contained inference runner (standalone mode only).
+    if standalone:
+        runner_path = Path(__file__).with_name("bundle_runner.py")
+        if runner_path.exists():
+            (bundle_dir / "infer.py").write_text(runner_path.read_text(encoding="utf-8"), encoding="utf-8")
+        (bundle_dir / "requirements.txt").write_text(_bundle_requirements_text(runtime_versions), encoding="utf-8")
+        (bundle_dir / "requirements-pytorch-fallback.txt").write_text(
+            _bundle_pytorch_fallback_requirements_text(runtime_versions), encoding="utf-8"
+        )
+        src_pkg_dir = Path(__file__).resolve().parent
+        dst_pkg_dir = bundle_dir / src_pkg_dir.name
+        try:
+            if not dst_pkg_dir.exists():
+                shutil.copytree(
+                    src_pkg_dir,
+                    dst_pkg_dir,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+                )
+        except Exception:
+            pass
 
     onnx_path: Optional[Path] = None
     quantized_path: Optional[Path] = None
@@ -899,19 +542,44 @@ def create_bundle(
             )
             save_json(bundle_dir / "preprocess.json", preprocess)
 
+    # Resolve bundle identity fields.
+    ds_name = md.get("name") or dataset_dir.name
+    resolved_model_name = model_name or ds_name or "model"
+    resolved_bundle_id = bundle_id or f"{_safe_name(resolved_model_name)}-v{model_version}"
+
+    # Inline class map: {"0": "name0", "1": "name1", ...} — required by MoldPilot.
+    classes_map = {str(i): name for i, name in enumerate(class_names)}
+
+    # Compute SHA-256 checksums for all files written so far (manifest itself excluded).
+    checksums = _compute_checksums(bundle_dir, exclude=["manifest.json"])
+
     manifest = {
+        # --- MoldPilot-required identity fields ---
+        "bundle_id": resolved_bundle_id,
+        "model_name": resolved_model_name,
+        "model_version": model_version,
+        "channel": channel,
+        "supersedes": supersedes,
+        "min_app_version": min_app_version,
+        # Inline class map for MoldPilot OnnxInferenceService.
+        "classes": classes_map,
+        # Execution provider hint; MoldPilot will try providers in order.
+        "runtime": {
+            "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        },
+        # SHA-256 integrity checksums for every file in the bundle.
+        "checksums": checksums,
+        # --- MoldVision provenance fields ---
         "format_version": 2,
         "created_at": datetime.utcnow().isoformat() + "Z",
         "dataset_dir": str(dataset_dir),
         "source_weights": str(weights),
-        "bundle_dir": str(bundle_dir),
-        "runtime_versions": runtime_versions,
         "primary_artifact": {
             "format": "onnx" if (quantized_path or fp16_path or onnx_path) else "pytorch-checkpoint",
             "path": (
-                str(quantized_path.name) if quantized_path 
-                else (str(fp16_path.name) if fp16_path 
-                else (str(onnx_path.name) if onnx_path 
+                str(quantized_path.name) if quantized_path
+                else (str(fp16_path.name) if fp16_path
+                else (str(onnx_path.name) if onnx_path
                 else str(dst_weights.name)))
             ),
             "runtime": ("onnxruntime" if (quantized_path or fp16_path or onnx_path) else "pytorch"),
@@ -925,14 +593,6 @@ def create_bundle(
             "checkpoint_path": str(dst_weights.name),
             "raw_checkpoint_path": (str(raw_ckpt_in_bundle.name) if raw_ckpt_in_bundle else None),
         },
-        "portability": {
-            "portable_checkpoint_requested": bool(portable_checkpoint),
-            "allow_raw_checkpoint_fallback": bool(allow_raw_checkpoint_fallback),
-            "strict_checkpoint_loading": bool(strict),
-            "self_contained_python_runner": True,
-            "onnx_is_primary": bool(onnx_path is not None or quantized_path is not None or fp16_path is not None),
-            "tensorrt_status": tensorrt_status,
-        },
         "tensorrt": {
             "status": tensorrt_status,
             "message": tensorrt_message,
@@ -944,16 +604,22 @@ def create_bundle(
             "message": checkpoint_write_message,
             "raw_checkpoint_path": (str(raw_ckpt_in_bundle.name) if raw_ckpt_in_bundle else None),
         },
-        "files": sorted(({p.name for p in bundle_dir.iterdir() if p.is_file()} | {"bundle_manifest.json"})),
+        "runtime_versions": runtime_versions,
+        "standalone": standalone,
     }
-    save_json(bundle_dir / "bundle_manifest.json", manifest)
+    save_json(bundle_dir / "manifest.json", manifest)
 
-    if make_zip:
-        zip_path = bundle_dir.with_suffix(".zip")
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    def _write_archive(suffix: str) -> None:
+        archive_path = bundle_dir.with_suffix(suffix)
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for p in bundle_dir.rglob("*"):
                 if p.is_file():
                     zf.write(p, arcname=str(p.relative_to(bundle_dir)))
+
+    if make_zip:
+        _write_archive(".zip")
+    if make_mpk:
+        _write_archive(".mpk")
 
     message = f"Created bundle: {bundle_dir}"
     if tensorrt_status == "ok":

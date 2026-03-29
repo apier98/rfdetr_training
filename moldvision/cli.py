@@ -127,7 +127,20 @@ def build_parser() -> argparse.ArgumentParser:
     bd.add_argument("--fp16", action="store_true", help="TensorRT: build FP16 engine")
     bd.add_argument("--workspace-mb", type=int, default=2048, help="TensorRT: workspace size in MB")
     bd.add_argument("--zip", action="store_true", help="Also write <bundle>.zip next to the bundle dir")
+    bd.add_argument("--mpk", action="store_true", help="Also write <bundle>.mpk next to the bundle dir (ARIA MoldPilot install format)")
     bd.add_argument("--overwrite", action="store_true", help="Overwrite output dir if it exists")
+    # MoldPilot identity fields
+    bd.add_argument("--bundle-id", default=None, help="Unique bundle identifier (default: auto-generated from model-name + version, e.g. mymodel-v1.0.0)")
+    bd.add_argument("--model-name", default=None, help="Human-readable model name (default: dataset name)")
+    bd.add_argument("--model-version", default="1.0.0", help="Semantic version string (default: 1.0.0)")
+    bd.add_argument("--channel", default="stable", choices=["stable", "beta"], help="Release channel (default: stable)")
+    bd.add_argument("--supersedes", default=None, help="bundle_id of the previous version this release replaces (for MoldPilot rollback support)")
+    bd.add_argument("--min-app-version", default="0.0.0", help="Minimum ARIA MoldPilot version required to use this bundle (default: 0.0.0)")
+    bd.add_argument(
+        "--standalone",
+        action="store_true",
+        help="Include Python inference runner (infer.py, requirements.txt, vendored moldvision/) for use outside of ARIA MoldPilot.",
+    )
 
     # infer (bundle)
     inf = sub.add_parser("infer", help="Run inference using a deployment bundle directory (debug/smoke check)")

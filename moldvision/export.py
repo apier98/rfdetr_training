@@ -421,10 +421,26 @@ def export_onnx(
             try:
                 print("Note: retrying ONNX export with opset=18 (required for antialiased bicubic resize).")
                 _do_export(18)
-                return ExportResult(True, output, f"Wrote ONNX: {output}")
             except Exception as e2:
                 return ExportResult(False, None, f"torch.onnx.export failed (after retry opset=18): {e2}")
-        return ExportResult(False, None, f"torch.onnx.export failed: {e}")
+        else:
+            return ExportResult(False, None, f"torch.onnx.export failed: {e}")
+
+    # Structural validation — catches broken graphs that torch.onnx.export
+    # writes without raising (e.g. missing initialisers, bad shapes).
+    try:
+        import onnx  # type: ignore
+        onnx.checker.check_model(str(output))
+    except ImportError:
+        pass  # onnx not installed; skip silently
+    except Exception as val_err:
+        return ExportResult(False, None, f"ONNX graph validation failed: {val_err}")
+
+    if half:
+        print(
+            "Note: FP16 ONNX model requires a GPU/CUDA ONNX Runtime provider for inference. "
+            "CPU execution of FP16 models is not natively supported by onnxruntime."
+        )
 
     return ExportResult(True, output, f"Wrote ONNX: {output}")
 
