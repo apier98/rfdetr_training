@@ -145,7 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
     # infer (bundle)
     inf = sub.add_parser("infer", help="Run inference using a deployment bundle directory (debug/smoke check)")
     inf.add_argument("--bundle-dir", "-b", required=True)
-    inf.add_argument("--image", "-i", required=True)
+    _inf_src = inf.add_mutually_exclusive_group(required=True)
+    _inf_src.add_argument("--image", "-i", default=None, help="Single image path for inference")
+    _inf_src.add_argument("--input-dir", default=None, help="Directory of images for batch inference")
+    inf.add_argument("--out-dir", default=None, help="Batch mode: output directory for JSON results and overlays (default: <input-dir>/results/)")
+    inf.add_argument("--overlays", action="store_true", help="Batch mode: also write overlay images alongside JSON results")
     inf.add_argument("--weights", "-w", default=None, help="Override fallback checkpoint path (default: <bundle>/checkpoint.pth)")
     inf.add_argument("--backend", choices=["auto", "tensorrt", "onnx", "pytorch"], default=None, help="Inference backend (default: from config/env, fallback auto)")
     inf.add_argument("--device", default=None)
@@ -386,6 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable inference_mode patch (if auto-enabled)",
     )
     tr.add_argument("--no-validate", action="store_true", help="Skip dataset validation checks")
+    tr.add_argument("--log-file", default=None, help="Write training output to this log file (default: auto → <output_dir>/training.log)")
+    tr.add_argument("--no-log-file", action="store_true", help="Disable file logging (console only)")
 
     # config
     cfg_p = sub.add_parser("config", help="View or edit persistent MoldVision settings")

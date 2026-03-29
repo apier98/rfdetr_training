@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import json
 import sys
@@ -20,6 +21,77 @@ from .coco import (
 from .datasets import load_metadata
 from .model_factory import instantiate_rfdetr_model
 from .rfdetr_patches import patch_albumentations_empty_masks
+
+
+class _TeeStream:
+    """Writes to two streams simultaneously (primary console + log file)."""
+
+    def __init__(self, primary, secondary):
+        self._primary = primary
+        self._secondary = secondary
+
+    def write(self, data: str) -> None:
+        try:
+            self._primary.write(data)
+        except Exception:
+            pass
+        try:
+            self._secondary.write(data)
+        except Exception:
+            pass
+
+    def flush(self) -> None:
+        for s in (self._primary, self._secondary):
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def __getattr__(self, name: str):
+        return getattr(self._primary, name)
+
+
+class _TeeLogger:
+    """Context manager that mirrors stdout and stderr into a UTF-8 log file."""
+
+    def __init__(self, log_path: Path) -> None:
+        self._log_path = log_path
+        self._file = None
+        self._orig_stdout = None
+        self._orig_stderr = None
+
+    def __enter__(self) -> "_TeeLogger":
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = open(self._log_path, "w", encoding="utf-8", buffering=1)
+            self._file.write(f"# Training log started {datetime.now().isoformat()} #\n\n")
+            self._orig_stdout = sys.stdout
+            self._orig_stderr = sys.stderr
+            sys.stdout = _TeeStream(self._orig_stdout, self._file)
+            sys.stderr = _TeeStream(self._orig_stderr, self._file)
+        except Exception as exc:
+            try:
+                print(f"Warning: could not open log file {self._log_path}: {exc}", file=sys.stderr)
+            except Exception:
+                pass
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            if self._orig_stdout is not None:
+                sys.stdout = self._orig_stdout
+            if self._orig_stderr is not None:
+                sys.stderr = self._orig_stderr
+        except Exception:
+            pass
+        try:
+            if self._file is not None:
+                self._file.write(f"\n# Training log ended {datetime.now().isoformat()} #\n")
+                self._file.close()
+                self._file = None
+        except Exception:
+            pass
+        return False  # never suppress exceptions
 
 
 @dataclass(frozen=True)
@@ -56,6 +128,9 @@ class TrainConfig:
     do_random_resize_via_padding: Optional[bool]
     aug_config: Optional[Dict[str, Any]]
     no_aug: bool
+    # File logging (fields with defaults must come last)
+    log_file: Optional[str] = None  # explicit path; None = auto (output_dir/training.log)
+    no_log_file: bool = False  # if True, disable file logging entirely
 
 
 def _package_version(dist_name: str) -> Optional[str]:
@@ -371,238 +446,246 @@ def train(cfg: TrainConfig) -> int:
 
     out_dir = resolve_path(cfg.output_dir) if cfg.output_dir else (dataset_dir / "models")
     out_dir.mkdir(parents=True, exist_ok=True)
-    _archive_previous_error_trace(out_dir)
 
-    if cfg.resume and cfg.finetune_from:
-        print("Error: --resume and --finetune-from are mutually exclusive.", file=sys.stderr)
-        return 5
-    if (not cfg.pretrained) and cfg.pretrain_weights:
-        print("Error: --no-pretrained cannot be combined with --pretrain-weights.", file=sys.stderr)
-        return 5
+    _log_path: Optional[Path] = None
+    if not cfg.no_log_file:
+        _log_path = Path(cfg.log_file) if cfg.log_file else (out_dir / "training.log")
 
-    # instantiate model
-    try:
-        # Pretraining behavior:
-        # - By default, match upstream RF-DETR fine-tuning behavior by allowing the selected
-        #   model class to use its default pretrained weights.
-        # - --no-pretrained disables that and starts from scratch.
-        # - --pretrain-weights overrides the default pretrained source with a user-provided path.
-        if cfg.pretrain_weights:
-            pretrain_weights = cfg.pretrain_weights
-            force_kwarg = True
-        elif cfg.pretrained:
-            pretrain_weights = None
-            force_kwarg = False
-        else:
-            pretrain_weights = None
-            force_kwarg = True
+    with (_TeeLogger(_log_path) if _log_path is not None else contextlib.nullcontext()):
+        if _log_path is not None:
+            print(f"Note: logging training output to {_log_path}")
+        _archive_previous_error_trace(out_dir)
 
-        model, cls_name, size_applied = instantiate_rfdetr_model(
-            cfg.task,
-            cfg.size,
-            num_classes=num_classes,
-            pretrain_weights=pretrain_weights,
-            force_pretrain_weights_kwarg=force_kwarg,
-        )
-        if cfg.task.lower().strip() == "seg" and not size_applied:
-            print(f"Note: --size {cfg.size!r} not applied for segmentation; using {cls_name}.")
-        else:
-            print(f"Note: instantiated model: {cls_name} (task={cfg.task}, size={cfg.size}).")
-    except Exception as e:
-        print("Failed to instantiate model. Is `rfdetr` installed in this environment?", file=sys.stderr)
-        print(str(e), file=sys.stderr)
-        return 6
+        if cfg.resume and cfg.finetune_from:
+            print("Error: --resume and --finetune-from are mutually exclusive.", file=sys.stderr)
+            return 5
+        if (not cfg.pretrained) and cfg.pretrain_weights:
+            print("Error: --no-pretrained cannot be combined with --pretrain-weights.", file=sys.stderr)
+            return 5
 
-    if cfg.task.lower().strip() == "seg":
+        # instantiate model
         try:
-            if patch_albumentations_empty_masks():
-                print("Note: patched RF-DETR Albumentations wrapper to allow empty-mask/background seg samples.")
-        except Exception as e:
-            print(f"Warning: could not apply RF-DETR empty-mask patch: {e}", file=sys.stderr)
+            # Pretraining behavior:
+            # - By default, match upstream RF-DETR fine-tuning behavior by allowing the selected
+            #   model class to use its default pretrained weights.
+            # - --no-pretrained disables that and starts from scratch.
+            # - --pretrain-weights overrides the default pretrained source with a user-provided path.
+            if cfg.pretrain_weights:
+                pretrain_weights = cfg.pretrain_weights
+                force_kwarg = True
+            elif cfg.pretrained:
+                pretrain_weights = None
+                force_kwarg = False
+            else:
+                pretrain_weights = None
+                force_kwarg = True
 
-    if cfg.pretrained and not cfg.pretrain_weights:
-        maybe_dl = getattr(model, "maybe_download_pretrain_weights", None)
-        if callable(maybe_dl):
-            print("Ensuring pretrained weights are available (downloading if needed)...")
+            model, cls_name, size_applied = instantiate_rfdetr_model(
+                cfg.task,
+                cfg.size,
+                num_classes=num_classes,
+                pretrain_weights=pretrain_weights,
+                force_pretrain_weights_kwarg=force_kwarg,
+            )
+            if cfg.task.lower().strip() == "seg" and not size_applied:
+                print(f"Note: --size {cfg.size!r} not applied for segmentation; using {cls_name}.")
+            else:
+                print(f"Note: instantiated model: {cls_name} (task={cfg.task}, size={cfg.size}).")
+        except Exception as e:
+            print("Failed to instantiate model. Is `rfdetr` installed in this environment?", file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            return 6
+
+        if cfg.task.lower().strip() == "seg":
             try:
-                maybe_dl()
+                if patch_albumentations_empty_masks():
+                    print("Note: patched RF-DETR Albumentations wrapper to allow empty-mask/background seg samples.")
             except Exception as e:
-                print(f"Warning: automatic pretrained download failed: {e}", file=sys.stderr)
+                print(f"Warning: could not apply RF-DETR empty-mask patch: {e}", file=sys.stderr)
 
-    # optional finetune-from weights
-    if cfg.finetune_from:
-        try:
-            import torch
+        if cfg.pretrained and not cfg.pretrain_weights:
+            maybe_dl = getattr(model, "maybe_download_pretrain_weights", None)
+            if callable(maybe_dl):
+                print("Ensuring pretrained weights are available (downloading if needed)...")
+                try:
+                    maybe_dl()
+                except Exception as e:
+                    print(f"Warning: automatic pretrained download failed: {e}", file=sys.stderr)
 
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            res = load_checkpoint_weights(
-                model,
-                cfg.finetune_from,
-                device,
-                checkpoint_key=cfg.checkpoint_key,
-                allow_replace_model=cfg.use_checkpoint_model,
-                verbose=True,
-            )
-            if res.replacement_model is not None:
-                model = res.replacement_model
-            if not res.ok:
-                print(f"Warning: could not load finetune-from weights: {res.message}", file=sys.stderr)
-        except Exception as e:
-            print(f"Warning: finetune-from load failed: {e}", file=sys.stderr)
+        # optional finetune-from weights
+        if cfg.finetune_from:
+            try:
+                import torch
 
-    # build train kwargs
-    train_kwargs: Dict[str, Any] = {
-        "dataset_dir": str(coco_dir),
-        "epochs": int(cfg.epochs),
-        "batch_size": int(cfg.batch_size),
-        "grad_accum_steps": int(cfg.grad_accum),
-        "lr": float(cfg.lr),
-        "tensorboard": bool(cfg.tensorboard),
-        "wandb": bool(cfg.wandb),
-        "early_stopping": bool(cfg.early_stopping),
-        # RF-DETR's `eval` flag behaves like DETR's `--eval`: run evaluation and exit.
-        "eval": bool(cfg.eval_only),
-        "output_dir": str(out_dir),
-        "run_test": bool(cfg.run_test),
-        "do_benchmark": bool(cfg.benchmark),
-    }
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                res = load_checkpoint_weights(
+                    model,
+                    cfg.finetune_from,
+                    device,
+                    checkpoint_key=cfg.checkpoint_key,
+                    allow_replace_model=cfg.use_checkpoint_model,
+                    verbose=True,
+                )
+                if res.replacement_model is not None:
+                    model = res.replacement_model
+                if not res.ok:
+                    print(f"Warning: could not load finetune-from weights: {res.message}", file=sys.stderr)
+            except Exception as e:
+                print(f"Warning: finetune-from load failed: {e}", file=sys.stderr)
 
-    if cfg.device:
-        train_kwargs["device"] = str(cfg.device)
+        # build train kwargs
+        train_kwargs: Dict[str, Any] = {
+            "dataset_dir": str(coco_dir),
+            "epochs": int(cfg.epochs),
+            "batch_size": int(cfg.batch_size),
+            "grad_accum_steps": int(cfg.grad_accum),
+            "lr": float(cfg.lr),
+            "tensorboard": bool(cfg.tensorboard),
+            "wandb": bool(cfg.wandb),
+            "early_stopping": bool(cfg.early_stopping),
+            # RF-DETR's `eval` flag behaves like DETR's `--eval`: run evaluation and exit.
+            "eval": bool(cfg.eval_only),
+            "output_dir": str(out_dir),
+            "run_test": bool(cfg.run_test),
+            "do_benchmark": bool(cfg.benchmark),
+        }
 
-    # On Windows, default to num_workers=0 unless user overrides (common multiprocessing pain point).
-    num_workers = cfg.num_workers
-    if num_workers is None and os.name == "nt":
-        num_workers = 0
-        print("Note: Windows detected; defaulting --num-workers to 0 for stability.")
-    if num_workers is not None:
-        train_kwargs["num_workers"] = int(num_workers)
+        if cfg.device:
+            train_kwargs["device"] = str(cfg.device)
 
-    if cfg.resolution is not None:
-        res = int(cfg.resolution)
-        if res <= 0:
-            print("Error: --resolution must be > 0", file=sys.stderr)
-            return 7
-        if res % 32 != 0:
-            print(
-                f"Warning: resolution={res} is not divisible by 32. Some RF-DETR backbones require 32-divisible sizes.",
-                file=sys.stderr,
-            )
-        if res % 224 != 0:
-            # from community reports: tutorials mention 56 but some asserts require 32; LCM is 224
-            print(
-                f"Note: resolution={res}. If you hit resolution divisibility asserts, try 224/448/etc.",
-                file=sys.stderr,
-            )
-        train_kwargs["resolution"] = res
+        # On Windows, default to num_workers=0 unless user overrides (common multiprocessing pain point).
+        num_workers = cfg.num_workers
+        if num_workers is None and os.name == "nt":
+            num_workers = 0
+            print("Note: Windows detected; defaulting --num-workers to 0 for stability.")
+        if num_workers is not None:
+            train_kwargs["num_workers"] = int(num_workers)
 
-    if bool(cfg.no_aug):
-        train_kwargs["aug_config"] = {}
-        print("Note: augmentations disabled via --no-aug (aug_config={}).")
-    elif cfg.aug_config is not None:
-        train_kwargs["aug_config"] = cfg.aug_config
-        print("Note: using custom aug_config from CLI.")
-
-    # multi-scale / resize policies
-    if cfg.task.lower().strip() == "seg":
-        # RF-DETR seg can crash with "masks cannot be empty" when multi-scale training crops away all instances.
-        # Default to a stable, deployment-friendly regime unless explicitly overridden.
-        if cfg.multi_scale is None:
-            train_kwargs["multi_scale"] = False
-            train_kwargs["expanded_scales"] = False
-            print("Note: --task seg: defaulting multi_scale=False for stability (pass --multi-scale to enable).")
-        else:
-            train_kwargs["multi_scale"] = bool(cfg.multi_scale)
-            if cfg.expanded_scales is not None:
-                train_kwargs["expanded_scales"] = bool(cfg.expanded_scales)
-    else:
-        if cfg.multi_scale is not None:
-            train_kwargs["multi_scale"] = bool(cfg.multi_scale)
-        if cfg.expanded_scales is not None:
-            train_kwargs["expanded_scales"] = bool(cfg.expanded_scales)
-    if cfg.do_random_resize_via_padding is not None:
-        train_kwargs["do_random_resize_via_padding"] = bool(cfg.do_random_resize_via_padding)
-
-    # segmentation defaults / safety
-    if cfg.task == "seg":
-        nq = cfg.num_queries if cfg.num_queries is not None else 200
-        ns = cfg.num_select if cfg.num_select is not None else nq
-        if ns > nq:
-            print(f"Warning: num_select ({ns}) > num_queries ({nq}); clamping num_select to {nq}.", file=sys.stderr)
-            ns = nq
-        train_kwargs["num_queries"] = int(nq)
-        train_kwargs["num_select"] = int(ns)
-    else:
-        if cfg.num_queries is not None:
-            train_kwargs["num_queries"] = int(cfg.num_queries)
-        if cfg.num_select is not None:
-            if cfg.num_queries is not None and cfg.num_select > cfg.num_queries:
+        if cfg.resolution is not None:
+            res = int(cfg.resolution)
+            if res <= 0:
+                print("Error: --resolution must be > 0", file=sys.stderr)
+                return 7
+            if res % 32 != 0:
                 print(
-                    f"Warning: num_select ({cfg.num_select}) > num_queries ({cfg.num_queries}); clamping.",
+                    f"Warning: resolution={res} is not divisible by 32. Some RF-DETR backbones require 32-divisible sizes.",
                     file=sys.stderr,
                 )
-                train_kwargs["num_select"] = int(cfg.num_queries)
+            if res % 224 != 0:
+                # from community reports: tutorials mention 56 but some asserts require 32; LCM is 224
+                print(
+                    f"Note: resolution={res}. If you hit resolution divisibility asserts, try 224/448/etc.",
+                    file=sys.stderr,
+                )
+            train_kwargs["resolution"] = res
+
+        if bool(cfg.no_aug):
+            train_kwargs["aug_config"] = {}
+            print("Note: augmentations disabled via --no-aug (aug_config={}).")
+        elif cfg.aug_config is not None:
+            train_kwargs["aug_config"] = cfg.aug_config
+            print("Note: using custom aug_config from CLI.")
+
+        # multi-scale / resize policies
+        if cfg.task.lower().strip() == "seg":
+            # RF-DETR seg can crash with "masks cannot be empty" when multi-scale training crops away all instances.
+            # Default to a stable, deployment-friendly regime unless explicitly overridden.
+            if cfg.multi_scale is None:
+                train_kwargs["multi_scale"] = False
+                train_kwargs["expanded_scales"] = False
+                print("Note: --task seg: defaulting multi_scale=False for stability (pass --multi-scale to enable).")
             else:
-                train_kwargs["num_select"] = int(cfg.num_select)
+                train_kwargs["multi_scale"] = bool(cfg.multi_scale)
+                if cfg.expanded_scales is not None:
+                    train_kwargs["expanded_scales"] = bool(cfg.expanded_scales)
+        else:
+            if cfg.multi_scale is not None:
+                train_kwargs["multi_scale"] = bool(cfg.multi_scale)
+            if cfg.expanded_scales is not None:
+                train_kwargs["expanded_scales"] = bool(cfg.expanded_scales)
+        if cfg.do_random_resize_via_padding is not None:
+            train_kwargs["do_random_resize_via_padding"] = bool(cfg.do_random_resize_via_padding)
 
-    if cfg.resume:
-        train_kwargs["resume"] = cfg.resume
+        # segmentation defaults / safety
+        if cfg.task == "seg":
+            nq = cfg.num_queries if cfg.num_queries is not None else 200
+            ns = cfg.num_select if cfg.num_select is not None else nq
+            if ns > nq:
+                print(f"Warning: num_select ({ns}) > num_queries ({nq}); clamping num_select to {nq}.", file=sys.stderr)
+                ns = nq
+            train_kwargs["num_queries"] = int(nq)
+            train_kwargs["num_select"] = int(ns)
+        else:
+            if cfg.num_queries is not None:
+                train_kwargs["num_queries"] = int(cfg.num_queries)
+            if cfg.num_select is not None:
+                if cfg.num_queries is not None and cfg.num_select > cfg.num_queries:
+                    print(
+                        f"Warning: num_select ({cfg.num_select}) > num_queries ({cfg.num_queries}); clamping.",
+                        file=sys.stderr,
+                    )
+                    train_kwargs["num_select"] = int(cfg.num_queries)
+                else:
+                    train_kwargs["num_select"] = int(cfg.num_select)
 
-    # save config (portable-ish; store relative-ish paths when possible)
-    try:
-        payload = asdict(cfg)
-        payload["dataset_dir"] = str(Path(payload["dataset_dir"]).as_posix())
-        payload["output_dir"] = str(out_dir.as_posix())
-        (out_dir / "train_args.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        if cfg.resume:
+            train_kwargs["resume"] = cfg.resume
 
-    try:
-        with _PatchedInferenceMode(patch_enabled):
-            if cfg.eval_only:
-                print("Note: --eval-only enabled; running evaluation only (no training epochs).")
-            model.train(**train_kwargs)  # type: ignore[attr-defined]
-    except Exception as e:
-        import traceback
+        # save config (portable-ish; store relative-ish paths when possible)
+        try:
+            payload = asdict(cfg)
+            payload["dataset_dir"] = str(Path(payload["dataset_dir"]).as_posix())
+            payload["output_dir"] = str(out_dir.as_posix())
+            (out_dir / "train_args.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
-        tb = traceback.format_exc()
-        (out_dir / "training_error_trace.txt").write_text(tb, encoding="utf-8")
-        msg = str(e)
-        print(f"Training failed: {e}", file=sys.stderr)
-        print(f"Full traceback written to: {out_dir / 'training_error_trace.txt'}", file=sys.stderr)
+        try:
+            with _PatchedInferenceMode(patch_enabled):
+                if cfg.eval_only:
+                    print("Note: --eval-only enabled; running evaluation only (no training epochs).")
+                model.train(**train_kwargs)  # type: ignore[attr-defined]
+        except Exception as e:
+            import traceback
+
+            tb = traceback.format_exc()
+            (out_dir / "training_error_trace.txt").write_text(tb, encoding="utf-8")
+            msg = str(e)
+            print(f"Training failed: {e}", file=sys.stderr)
+            print(f"Full traceback written to: {out_dir / 'training_error_trace.txt'}", file=sys.stderr)
+            _summarize_training_outputs(out_dir)
+
+            low = msg.lower()
+            if "inference tensors cannot be saved for backward" in low:
+                print(
+                    "Hint: this is a known issue on some setups. Re-run with `--patch-inference-mode` "
+                    "(or leave it on auto for Windows).",
+                    file=sys.stderr,
+                )
+            if "freeze_support" in low or "attempt has been made to start a new process" in low:
+                print(
+                    "Hint: Windows multiprocessing issue. Try `--num-workers 0` and run from a terminal (not inside a notebook).",
+                    file=sys.stderr,
+                )
+            if "masks cannot be empty" in low:
+                print(
+                    "Hint: segmentation training crashed because a transform produced an empty mask set for a sample. "
+                    "Keep multi-scale/random-resize conservative, and prune invalid or tiny masks with "
+                    "`python -m moldvision dataset prune-empty-masks -d <DATASET_DIR> --split train|valid` "
+                    "or `python -m moldvision dataset prune-small-masks ...`.",
+                    file=sys.stderr,
+                )
+            if "out of memory" in low or "cuda out of memory" in low:
+                print(
+                    "Hint: OOM. Reduce `--batch-size` or `--resolution`. "
+                    "Note: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is not supported on all platforms (e.g. Windows).",
+                    file=sys.stderr,
+                )
+            return 10
+
+        print(f"Training finished. Outputs in: {out_dir}")
+        _write_deployment_bundle(out_dir, dataset_dir, cfg, md)
+        _try_write_portable_checkpoint(out_dir, checkpoint_key=cfg.checkpoint_key)
+        _cleanup_redundant_checkpoints(out_dir)
         _summarize_training_outputs(out_dir)
-
-        low = msg.lower()
-        if "inference tensors cannot be saved for backward" in low:
-            print(
-                "Hint: this is a known issue on some setups. Re-run with `--patch-inference-mode` "
-                "(or leave it on auto for Windows).",
-                file=sys.stderr,
-            )
-        if "freeze_support" in low or "attempt has been made to start a new process" in low:
-            print(
-                "Hint: Windows multiprocessing issue. Try `--num-workers 0` and run from a terminal (not inside a notebook).",
-                file=sys.stderr,
-            )
-        if "masks cannot be empty" in low:
-            print(
-                "Hint: segmentation training crashed because a transform produced an empty mask set for a sample. "
-                "Keep multi-scale/random-resize conservative, and prune invalid or tiny masks with "
-                "`python -m moldvision dataset prune-empty-masks -d <DATASET_DIR> --split train|valid` "
-                "or `python -m moldvision dataset prune-small-masks ...`.",
-                file=sys.stderr,
-            )
-        if "out of memory" in low or "cuda out of memory" in low:
-            print(
-                "Hint: OOM. Reduce `--batch-size` or `--resolution`. "
-                "Note: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is not supported on all platforms (e.g. Windows).",
-                file=sys.stderr,
-            )
-        return 10
-
-    print(f"Training finished. Outputs in: {out_dir}")
-    _write_deployment_bundle(out_dir, dataset_dir, cfg, md)
-    _try_write_portable_checkpoint(out_dir, checkpoint_key=cfg.checkpoint_key)
-    _cleanup_redundant_checkpoints(out_dir)
-    _summarize_training_outputs(out_dir)
-    return 0
+        return 0

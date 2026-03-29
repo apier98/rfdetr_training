@@ -648,6 +648,8 @@ def handle_train(args) -> int:
             do_random_resize_via_padding=getattr(args, "do_random_resize_via_padding", None),
             aug_config=aug_cfg,
             no_aug=bool(getattr(args, "no_aug", False)),
+            log_file=getattr(args, "log_file", None),
+            no_log_file=bool(getattr(args, "no_log_file", False)),
         )
         return int(train(cfg))
     except KeyboardInterrupt:
@@ -805,7 +807,119 @@ def handle_bundle(args) -> int:
     return 0
 
 
+def _draw_infer_overlay(img_path: Path, res, mask_alpha: float, out_path: Path) -> None:
+    """Draw detection/segmentation overlay and save to out_path. Best-effort."""
+    try:
+        from PIL import Image, ImageDraw  # type: ignore
+    except Exception:
+        return
+    try:
+        img = Image.open(str(img_path)).convert("RGB")
+        if res.masks:
+            try:
+                import numpy as np
+                rgba = img.convert("RGBA")
+                overlay = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
+                w_img, h_img = rgba.size
+                for i, m in enumerate(res.masks):
+                    if m is None:
+                        continue
+                    mm = np.asarray(m)
+                    if mm.ndim != 2:
+                        continue
+                    if mm.shape[0] != h_img or mm.shape[1] != w_img:
+                        mi = Image.fromarray((mm.astype(np.uint8) * 255))
+                        mi = mi.resize((w_img, h_img), resample=Image.NEAREST)
+                        mm = (np.asarray(mi) > 127)
+                    r = (37 * (i + 1)) % 255
+                    g = (17 * (i + 1)) % 255
+                    b = (97 * (i + 1)) % 255
+                    mask_img = Image.fromarray((mm.astype(np.uint8) * int(round(mask_alpha * 255))))
+                    overlay.paste((int(r), int(g), int(b), int(round(mask_alpha * 255))), (0, 0), mask_img)
+                img = Image.alpha_composite(rgba, overlay).convert("RGB")
+            except Exception:
+                pass
+        draw = ImageDraw.Draw(img)
+        if res.boxes and res.scores and res.labels:
+            for b, sc, lab in zip(res.boxes, res.scores, res.labels):
+                x1, y1, x2, y2 = [float(x) for x in b]
+                draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
+                draw.text((x1 + 2, max(0, y1 - 12)), f"{int(lab)}:{float(sc):.2f}", fill=(0, 255, 0))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(str(out_path))
+    except Exception:
+        pass
+
+
+def _handle_batch_infer(args) -> int:
+    """Run inference on all images in a directory."""
+    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+    bundle_dir = Path(args.bundle_dir)
+    input_dir = Path(args.input_dir)
+    if not input_dir.is_dir():
+        print(f"Error: --input-dir is not a directory: {input_dir}", file=sys.stderr)
+        return 2
+    out_dir = Path(args.out_dir) if args.out_dir else (input_dir / "results")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    images = sorted(p for p in input_dir.iterdir() if p.suffix.lower() in _IMAGE_EXTS)
+    if not images:
+        print(f"No images found in {input_dir}", file=sys.stderr)
+        return 2
+
+    weights = Path(args.weights) if args.weights else None
+    backend = args.backend or appconfig.get_default_inference_backend()
+    mask_alpha = float(args.mask_alpha) if args.mask_alpha is not None else 0.45
+    draw_overlays = bool(getattr(args, "overlays", False))
+
+    summary = []
+    errors = 0
+    for img_path in images:
+        try:
+            res = infer_from_bundle(
+                bundle_dir=bundle_dir,
+                image_path=img_path,
+                weights_path=weights,
+                device=args.device,
+                score_thresh=args.threshold,
+                mask_thresh=args.mask_thresh,
+                checkpoint_key=args.checkpoint_key,
+                use_checkpoint_model=bool(args.use_checkpoint_model),
+                strict=bool(args.strict),
+                backend=str(backend),
+            )
+        except Exception as e:
+            print(f"Error [{img_path.name}]: {e}", file=sys.stderr)
+            errors += 1
+            continue
+
+        if not res.ok or res.payload is None:
+            print(f"Error [{img_path.name}]: {res.message}", file=sys.stderr)
+            errors += 1
+            continue
+
+        json_path = out_dir / f"{img_path.stem}.json"
+        json_path.write_text(json.dumps(res.payload, indent=2), encoding="utf-8")
+
+        if draw_overlays:
+            overlay_path = out_dir / f"{img_path.stem}_overlay{img_path.suffix}"
+            _draw_infer_overlay(img_path, res, mask_alpha, overlay_path)
+
+        n_det = len(res.boxes or [])
+        print(f"[{img_path.name}] {n_det} detection(s) → {json_path.name}")
+        summary.append({"image": img_path.name, "detections": n_det})
+
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    total = len(images)
+    ok = total - errors
+    print(f"\nBatch complete: {ok}/{total} succeeded. Results in: {out_dir}")
+    return 0 if errors == 0 else 3
+
+
 def handle_infer(args) -> int:
+    if getattr(args, "input_dir", None):
+        return _handle_batch_infer(args)
+
     bundle_dir = Path(args.bundle_dir)
     image_path = Path(args.image)
     weights = Path(args.weights) if args.weights else None
@@ -832,55 +946,13 @@ def handle_infer(args) -> int:
         return 2
 
     if args.out_image:
-        try:
-            from PIL import Image, ImageDraw  # type: ignore
-        except Exception as e:
-            print(f"Warning: PIL not available; cannot write --out-image ({e})", file=sys.stderr)
+        alpha = float(args.mask_alpha) if args.mask_alpha is not None else 0.45
+        out_img = resolve_path(args.out_image)
+        _draw_infer_overlay(image_path, res, alpha, out_img)
+        if out_img.exists():
+            print(f"Wrote: {out_img}")
         else:
-            try:
-                img = Image.open(str(image_path)).convert("RGB")
-
-                # masks (best-effort; requires numpy for fast conversion)
-                alpha = float(args.mask_alpha) if args.mask_alpha is not None else 0.45
-                if res.masks:
-                    try:
-                        import numpy as np
-
-                        rgba = img.convert("RGBA")
-                        overlay = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
-                        w_img, h_img = rgba.size
-                        for i, m in enumerate(res.masks):
-                            if m is None:
-                                continue
-                            mm = np.asarray(m)
-                            if mm.ndim != 2:
-                                continue
-                            if mm.shape[0] != h_img or mm.shape[1] != w_img:
-                                mi = Image.fromarray((mm.astype(np.uint8) * 255))
-                                mi = mi.resize((w_img, h_img), resample=Image.NEAREST)
-                                mm = (np.asarray(mi) > 127)
-                            r = (37 * (i + 1)) % 255
-                            g = (17 * (i + 1)) % 255
-                            b = (97 * (i + 1)) % 255
-                            mask_img = Image.fromarray((mm.astype(np.uint8) * int(round(alpha * 255))))
-                            overlay.paste((int(r), int(g), int(b), int(round(alpha * 255))), (0, 0), mask_img)
-                        img = Image.alpha_composite(rgba, overlay).convert("RGB")
-                    except Exception:
-                        pass
-
-                draw = ImageDraw.Draw(img)
-                if res.boxes and res.scores and res.labels:
-                    for b, sc, lab in zip(res.boxes, res.scores, res.labels):
-                        x1, y1, x2, y2 = [float(x) for x in b]
-                        draw.rectangle([x1, y1, x2, y2], outline=(0, 255, 0), width=2)
-                        draw.text((x1 + 2, max(0, y1 - 12)), f"{int(lab)}:{float(sc):.2f}", fill=(0, 255, 0))
-
-                out_img = resolve_path(args.out_image)
-                out_img.parent.mkdir(parents=True, exist_ok=True)
-                img.save(str(out_img))
-                print(f"Wrote: {out_img}")
-            except Exception as e:
-                print(f"Warning: failed to write --out-image ({e})", file=sys.stderr)
+            print(f"Warning: failed to write --out-image", file=sys.stderr)
 
     if args.out_json:
         outp = resolve_path(args.out_json)
