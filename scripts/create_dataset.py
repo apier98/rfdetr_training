@@ -2,14 +2,14 @@
 """DEPRECATED wrapper for dataset creation.
 
 Use instead:
-  python -m rfdetr_training dataset create ...
+  python -m moldvision dataset create ...
 """
 
 from __future__ import annotations
 
 import sys
 
-from rfdetr_training.cli import main
+from moldvision.cli import main
 
 
 if __name__ == "__main__":

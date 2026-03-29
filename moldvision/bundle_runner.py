@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from rfdetr_training.postprocess import detections_to_json, filter_known_class_detections, load_bundle_config
-from rfdetr_training.infer import infer_from_bundle
-from rfdetr_training.pathutil import resolve_path
+from moldvision.postprocess import detections_to_json, filter_known_class_detections, load_bundle_config
+from moldvision.infer import infer_from_bundle
+from moldvision.pathutil import resolve_path
 
 
 def _color_for_id(i: int) -> Tuple[int, int, int]:
@@ -244,7 +244,7 @@ def main() -> int:
     args = ap.parse_args()
 
     bundle_dir = resolve_path(args.bundle_dir)
-    from rfdetr_training.infer import InferenceEngine
+    from moldvision.infer import InferenceEngine
     
     engine = InferenceEngine(
         bundle_dir=bundle_dir,

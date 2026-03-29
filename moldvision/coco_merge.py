@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,12 +125,12 @@ def merge_coco_into_split(
     dst_json = dst_split_dir / "_annotations.coco.json"
 
     try:
-        src = _load_json(src_json)
+        src = load_json_strict(src_json)
     except Exception as e:
         return MergeResult(False, f"Failed to parse source COCO json: {e}")
 
     if dst_json.exists():
-        dst = _load_json(dst_json)
+        dst = load_json_strict(dst_json)
     else:
         dst = _ensure_coco_skeleton(categories=list(src.get("categories", []) or []))
 
@@ -245,9 +244,9 @@ def merge_coco_into_split(
     if dst_json.exists():
         bak = dst_json.with_suffix(dst_json.suffix + ".bak")
         if not bak.exists():
-            bak.write_text(json.dumps(_load_json(dst_json), indent=2), encoding="utf-8")
+            save_json(bak, load_json_strict(dst_json))
 
-    _write_json(dst_json, dst)
+    save_json(dst_json, dst)
     return MergeResult(
         True,
         f"Merged {images_added} images and {annotations_added} annotations into {dst_json}",

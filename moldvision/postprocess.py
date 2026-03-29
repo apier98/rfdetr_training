@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from .pathutil import resolve_path
+from .jsonutil import load_json
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -21,13 +21,6 @@ class Letterbox:
     scale: float
 
 
-def _read_json(path: Path) -> Dict[str, Any]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
 def load_bundle_config(bundle_dir: Path) -> Dict[str, Any]:
     """Load deployment files from a directory.
 
@@ -42,7 +35,7 @@ def load_bundle_config(bundle_dir: Path) -> Dict[str, Any]:
     for name in ("model_config.json", "preprocess.json", "postprocess.json", "classes.json"):
         p = bundle_dir / name
         if p.exists():
-            out[name] = _read_json(p)
+            out[name] = load_json(p)
     return out
 
 

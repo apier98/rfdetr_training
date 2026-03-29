@@ -2,14 +2,14 @@
 """DEPRECATED wrapper for YOLO -> COCO conversion.
 
 Use instead:
-  python -m rfdetr_training dataset yolo-to-coco ...
+  python -m moldvision dataset yolo-to-coco ...
 """
 
 from __future__ import annotations
 
 import sys
 
-from rfdetr_training.cli import main
+from moldvision.cli import main
 
 
 if __name__ == "__main__":

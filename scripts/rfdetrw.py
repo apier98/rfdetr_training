@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sys
 
-from rfdetr_training.cli import main
+from moldvision.cli import main
 
 
 if __name__ == "__main__":

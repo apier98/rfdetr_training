@@ -16,7 +16,7 @@ def patch_albumentations_empty_masks() -> bool:
     except Exception:
         return False
 
-    if getattr(AlbumentationsWrapper, "_rfdetr_training_empty_masks_patched", False):
+    if getattr(AlbumentationsWrapper, "_moldvision_empty_masks_patched", False):
         return False
 
     original = AlbumentationsWrapper._apply_geometric_transform
@@ -42,5 +42,5 @@ def patch_albumentations_empty_masks() -> bool:
         return image_out, target_out
 
     AlbumentationsWrapper._apply_geometric_transform = _patched_apply_geometric_transform
-    AlbumentationsWrapper._rfdetr_training_empty_masks_patched = True
+    AlbumentationsWrapper._moldvision_empty_masks_patched = True
     return True

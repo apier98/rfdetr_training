@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from .pathutil import resolve_path
+from .jsonutil import load_json, load_json_strict
 
 from .coco import align_coco_categories_to_metadata, patch_coco_categories_supercategory
 from .coco_merge import merge_coco_into_split
@@ -29,7 +30,7 @@ class IngestResult:
 
 def _looks_like_coco(path: Path) -> bool:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = load_json_strict(path)
     except Exception:
         return False
     if not isinstance(data, dict):
@@ -93,7 +94,7 @@ def _count_split_items(ann_path: Path) -> Tuple[int, int]:
     if not ann_path.exists():
         return 0, 0
     try:
-        payload = json.loads(ann_path.read_text(encoding="utf-8"))
+        payload = load_json_strict(ann_path)
     except Exception:
         return 0, 0
     images = payload.get("images", []) or []
@@ -159,7 +160,7 @@ def ingest_labels_inbox(
 
     for src_json_path in coco_candidates:
         try:
-            src = json.loads(src_json_path.read_text(encoding="utf-8"))
+            src = load_json_strict(src_json_path)
         except Exception:
             continue
 
@@ -417,7 +418,7 @@ def ingest_labels_inbox(
         f"background_images={background_added}, quarantined={quarantined}. "
         f"Final split counts -> train: {train_images} images / {train_annotations} annotations, "
         f"valid: {valid_images} images / {valid_annotations} annotations. "
-        f"Next: run `python -m rfdetr_training dataset validate -d {dataset_dir} --task {yolo_task}`"
+        f"Next: run `python -m moldvision dataset validate -d {dataset_dir} --task {yolo_task}`"
     )
     return IngestResult(
         True,

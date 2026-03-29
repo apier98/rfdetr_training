@@ -562,8 +562,8 @@ def train(cfg: TrainConfig) -> int:
             print(
                 "Hint: segmentation training crashed because a transform produced an empty mask set for a sample. "
                 "Keep multi-scale/random-resize conservative, and prune invalid or tiny masks with "
-                "`python -m rfdetr_training dataset prune-empty-masks -d <DATASET_DIR> --split train|valid` "
-                "or `python -m rfdetr_training dataset prune-small-masks ...`.",
+                "`python -m moldvision dataset prune-empty-masks -d <DATASET_DIR> --split train|valid` "
+                "or `python -m moldvision dataset prune-small-masks ...`.",
                 file=sys.stderr,
             )
         if "out of memory" in low or "cuda out of memory" in low:

@@ -10,8 +10,8 @@ requires-python = ">=3.9"
 readme = "README.md"
 
 [project.scripts]
-moldvision = "rfdetr_training.cli:main"
+moldvision = "moldvision.cli:main"
 
 [tool.setuptools]
-packages = ["rfdetr_training"]
+packages = ["moldvision"]
 

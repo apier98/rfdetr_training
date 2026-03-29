@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-- `rfdetr_training/`: Primary Python package. Entry point is `python -m rfdetr_training` (see `rfdetr_training/__main__.py` and `rfdetr_training/cli.py`).
+- `moldvision/`: Primary Python package. Entry point is `python -m moldvision` (see `moldvision/__main__.py` and `moldvision/cli.py`).
 - `scripts/`: Optional, standalone utilities for dataset prep/debugging and inference. Treat these as helpers, not a stable API surface.
 - `datasets/`: Default working directory for local datasets created by the CLI (intentionally ignored by git).
 - `docs/`: Notes on tooling and transfer/inference workflows.
@@ -25,10 +25,10 @@ rfdetrw --help
 ```
 
 Common CLI commands:
-- `python -m rfdetr_training doctor`: Environment checks and fix hints.
-- `python -m rfdetr_training dataset --help`: Dataset creation/ingest/validation utilities.
-- `python -m rfdetr_training train ...`: Train RF-DETR (detect or seg).
-- `python -m rfdetr_training export ...`: Export to ONNX / TensorRT.
+- `python -m moldvision doctor`: Environment checks and fix hints.
+- `python -m moldvision dataset --help`: Dataset creation/ingest/validation utilities.
+- `python -m moldvision train ...`: Train RF-DETR (detect or seg).
+- `python -m moldvision export ...`: Export to ONNX / TensorRT.
 
 ## Coding Style & Naming Conventions
 
@@ -41,9 +41,9 @@ Common CLI commands:
 
 - There is no automated test suite in this repo yet.
 - Minimum smoke checks for changes:
-  - `python -m rfdetr_training --help`
-  - `python -m rfdetr_training doctor`
-  - For dataset changes, run `python -m rfdetr_training dataset validate -d datasets/<UUID> --task detect|seg` on a small sample dataset.
+  - `python -m moldvision --help`
+  - `python -m moldvision doctor`
+  - For dataset changes, run `python -m moldvision dataset validate -d datasets/<UUID> --task detect|seg` on a small sample dataset.
 
 ## Commit & Pull Request Guidelines
 

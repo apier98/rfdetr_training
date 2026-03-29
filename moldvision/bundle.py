@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.metadata
-import json
 import shutil
 import sys
 import zipfile
@@ -13,6 +12,7 @@ from .pathutil import resolve_path
 
 from .datasets import load_metadata
 from .export import export_onnx, export_tensorrt_from_onnx, quantize_onnx
+from .jsonutil import load_json, save_json
 from .model_factory import instantiate_rfdetr_model
 from .torch_compat import infer_backbone_patch_size, unwrap_torch_module
 
@@ -27,10 +27,6 @@ class BundleResult:
 def _safe_name(s: str) -> str:
     out = "".join([c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in (s or "")]).strip("_")
     return out or "bundle"
-
-
-def _write_json(path: Path, obj: Dict[str, Any]) -> None:
-    path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
 
 
 def _read_onnx_input_dtype(onnx_path: Path) -> Optional[str]:
@@ -522,7 +518,7 @@ def create_bundle(
     trained_model_cfg = {}
     if (models_dir / "model_config.json").exists():
         try:
-            trained_model_cfg = json.loads((models_dir / "model_config.json").read_text(encoding="utf-8"))
+            trained_model_cfg = load_json(models_dir / "model_config.json")
         except Exception:
             trained_model_cfg = {}
 
@@ -559,7 +555,7 @@ def create_bundle(
     runtime_versions = _bundle_runtime_versions()
 
     # Write configs at bundle root.
-    _write_json(bundle_dir / "classes.json", list(class_names))
+    save_json(bundle_dir / "classes.json", list(class_names))
     model_config = {
         "format_version": 1,
         "task": task_final,
@@ -571,7 +567,7 @@ def create_bundle(
         "dataset_name": md.get("name"),
         "runtime_versions": runtime_versions,
     }
-    _write_json(bundle_dir / "model_config.json", model_config)
+    save_json(bundle_dir / "model_config.json", model_config)
 
     preprocess = {
         "format_version": 1,
@@ -588,7 +584,7 @@ def create_bundle(
         },
         "note": "Input contract: RGB -> float32 0..1 -> ImageNet mean/std normalization -> model forward.",
     }
-    _write_json(bundle_dir / "preprocess.json", preprocess)
+    save_json(bundle_dir / "preprocess.json", preprocess)
 
     # More conservative defaults for detect to avoid a wall of duplicate boxes.
     if task_final == "detect":
@@ -614,7 +610,7 @@ def create_bundle(
         "min_box_size_default": 1.0,
         "note": "Postprocess: decode DETR raw outputs with RF-DETR's sigmoid + flattened top-K query/class selection, then filter degenerate boxes and apply optional NMS.",
     }
-    _write_json(bundle_dir / "postprocess.json", postprocess)
+    save_json(bundle_dir / "postprocess.json", postprocess)
 
     requested_exports = [str(ex).strip().lower() for ex in exports if str(ex).strip()]
     if not requested_exports:
@@ -741,7 +737,7 @@ def create_bundle(
                 "- Primary shipped model format is ONNX (`model.onnx`). If `model_quantized.onnx` or `model_fp16.onnx` is present, it will be preferred by default.",
                 "- If `model.engine` is also present and TensorRT runtime is available, `infer.py` will try TensorRT first and fall back to ONNX automatically.",
                 "- Preprocess keeps aspect ratio (letterbox) per `preprocess.json`.",
-                "- This bundle includes a vendored copy of the `rfdetr_training` package so `infer.py` can run without installing this repo.",
+                "- This bundle includes a vendored copy of the `moldvision` package so `infer.py` can run without installing this repo.",
                 "- Install the primary runtime with `pip install -r requirements.txt`.",
                 "- Install `requirements-pytorch-fallback.txt` only if you need checkpoint-based fallback inference.",
                 "- TensorRT runtime is optional and environment-specific; if it is unavailable, bundle inference falls back to ONNX automatically.",
@@ -901,7 +897,7 @@ def create_bundle(
                 "Input contract: RGB -> float32 0..1 -> ImageNet mean/std normalization -> "
                 f"cast to {detected_input_dtype} for the selected runtime artifact."
             )
-            _write_json(bundle_dir / "preprocess.json", preprocess)
+            save_json(bundle_dir / "preprocess.json", preprocess)
 
     manifest = {
         "format_version": 2,
@@ -950,7 +946,7 @@ def create_bundle(
         },
         "files": sorted(({p.name for p in bundle_dir.iterdir() if p.is_file()} | {"bundle_manifest.json"})),
     }
-    _write_json(bundle_dir / "bundle_manifest.json", manifest)
+    save_json(bundle_dir / "bundle_manifest.json", manifest)
 
     if make_zip:
         zip_path = bundle_dir.with_suffix(".zip")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -11,6 +10,7 @@ from .pathutil import resolve_path
 
 from .checkpoints import load_checkpoint_weights
 from .datasets import load_metadata
+from .jsonutil import load_json_strict
 from .model_factory import instantiate_rfdetr_model
 
 
@@ -48,7 +48,7 @@ def quantize_onnx(
         ann_path = split_dir / "_annotations.coco.json"
         if ann_path.exists():
             try:
-                coco_data = json.loads(ann_path.read_text(encoding="utf-8"))
+                coco_data = load_json_strict(ann_path)
                 images = coco_data.get("images", [])
                 # Use a subset for calibration
                 selected = images[: int(calibration_count)]
