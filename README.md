@@ -6,6 +6,7 @@ This repo is a CLI-first workspace to prepare datasets and train RF-DETR models 
 
 Core (supported) CLI:
 - Create dataset folders (UUID layout)
+- Extract frames from multiple videos (uniform sampling)
 - Convert YOLO → COCO (detect or seg)
 - Validate COCO splits before training
 - Subsample COCO splits (stratified by class + proportional background)
@@ -26,9 +27,16 @@ Run the CLI from the repo:
 1) Create a dataset folder:
 
 - `python -m rfdetr_training dataset create --name "my-dataset" -c monitor -c keyboard` (use multiple `-c` for multiple classes)
-- Or use a file: `python -m rfdetr_training dataset create --name "my-dataset" --classes-file classes.txt` (one class name per line)
+- `python -m rfdetr_training dataset create --name "my-dataset" --classes-file classes.txt` (one class name per line)
+
+1b) (Optional) Extract frames from videos for labeling:
+
+- `python -m rfdetr_training dataset extract-frames -v video1.mp4 -v video2.mp4 -n 500 -d datasets/<UUID>`
+- This samples 500 frames uniformly across all provided videos and saves them into `datasets/<UUID>/raw/`.
+- You can also use a custom output directory: `python -m rfdetr_training dataset extract-frames -v video1.mp4 -n 100 -o my_frames/`
 
 2) Put images in `datasets/<UUID>/raw/` and YOLO labels in `datasets/<UUID>/yolo/` (optional).
+
 
 If you have **mixed labels** (some images labeled in YOLO, some already labeled in COCO):
 - Keep everything in one dataset UUID folder.

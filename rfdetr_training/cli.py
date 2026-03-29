@@ -24,6 +24,7 @@ from .export import export_onnx, export_tensorrt_from_onnx
 from .ingest import ingest_labels_inbox
 from .infer import infer_from_bundle
 from .train import TrainConfig, train
+from .videos import extract_frames
 
 
 def _parse_classes(values: List[str] | None, classes_file: str | None) -> List[str]:
@@ -334,6 +335,12 @@ def build_parser() -> argparse.ArgumentParser:
     ds_ing.add_argument("--no-align-metadata", dest="align_metadata", action="store_false", help="Do not align COCO categories to METADATA.json")
     ds_ing.set_defaults(align_metadata=True)
     ds_ing.add_argument("--dry-run", action="store_true")
+
+    ds_ext = ds_sub.add_parser("extract-frames", help="Extract uniform frames from multiple videos")
+    ds_ext.add_argument("--videos", "-v", action="append", required=True, help="Path(s) to video files (can be repeated)")
+    ds_ext.add_argument("--num-frames", "-n", type=int, default=100, help="Total number of frames to extract across all videos")
+    ds_ext.add_argument("--dataset-dir", "-d", default=None, help="Dataset folder; if provided, frames are saved in <dataset-dir>/raw")
+    ds_ext.add_argument("--out-dir", "-o", default=None, help="Custom output directory; overrides --dataset-dir")
 
     # train
     tr = sub.add_parser("train", help="Train an RF-DETR model")
@@ -707,6 +714,41 @@ def main(argv: List[str] | None = None) -> int:
             return 2
         print(res.message)
         return 0
+
+    if args.cmd == "dataset" and args.dataset_cmd == "extract-frames":
+        out_path = None
+        if args.out_dir:
+            out_path = Path(args.out_dir)
+        elif args.dataset_dir:
+            out_path = Path(args.dataset_dir) / "raw"
+        else:
+            print("Error: Either --dataset-dir or --out-dir must be specified.", file=sys.stderr)
+            return 2
+
+        video_paths = []
+        for v in args.videos:
+            p = Path(v).expanduser().resolve()
+            if not p.exists():
+                print(f"Warning: Video not found: {p}")
+                continue
+            video_paths.append(p)
+
+        if not video_paths:
+            print("Error: No valid video files provided.")
+            return 2
+
+        try:
+            cnt = extract_frames(
+                video_paths=video_paths,
+                out_dir=out_path,
+                total_frames=int(args.num_frames),
+                verbose=True,
+            )
+            print(f"Successfully extracted {cnt} frames to {out_path}")
+            return 0
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
 
     if args.cmd == "train":
         aug_cfg = None
