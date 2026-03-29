@@ -213,7 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ds_subsample = ds_sub.add_parser("subsample", help="Subsample a COCO split ensuring class representation and proportional background images")
     ds_subsample.add_argument("--dataset-dir", "-d", required=True)
-    ds_subsample.add_argument("--split", choices=["train", "valid", "test"], required=True)
+    ds_subsample.add_argument("--split", choices=["train", "valid", "test", "all"], required=True,
+                              help="Split to subsample, or 'all' to run on train/valid/test in sequence")
     ds_subsample.add_argument("--fraction", type=float, default=None, help="Fraction of images to keep (e.g., 0.25)")
     ds_subsample.add_argument("--max-images", type=int, default=None, help="Maximum number of images to keep")
     ds_subsample.add_argument("--min-instances", type=int, default=1, help="Minimum instances per class to keep")
@@ -261,11 +262,21 @@ def build_parser() -> argparse.ArgumentParser:
     ds_ing.set_defaults(align_metadata=True)
     ds_ing.add_argument("--dry-run", action="store_true")
 
-    ds_ext = ds_sub.add_parser("extract-frames", help="Extract uniform frames from multiple videos")
-    ds_ext.add_argument("--videos", "-v", action="append", required=True, help="Path(s) to video files (can be repeated)")
-    ds_ext.add_argument("--num-frames", "-n", type=int, default=100, help="Total number of frames to extract across all videos")
-    ds_ext.add_argument("--dataset-dir", "-d", default=None, help="Dataset folder; if provided, frames are saved in <dataset-dir>/raw")
-    ds_ext.add_argument("--out-dir", "-o", default=None, help="Custom output directory; overrides --dataset-dir")
+    ds_ext = ds_sub.add_parser("extract-frames", help="Extract frames from video files for labeling")
+    ds_ext.add_argument("--videos", "-v", action="append", default=None,
+                        help="Path to a video file (can be repeated for multiple files)")
+    ds_ext.add_argument("--videos-dir", default=None,
+                        help="Folder to scan for video files (combined with --ext filter)")
+    ds_ext.add_argument("--ext", default="mp4,avi,mov,mkv,webm",
+                        help="Comma-separated video extensions to scan when using --videos-dir (default: mp4,avi,mov,mkv,webm)")
+    ds_ext.add_argument("--num-frames", "-n", type=int, default=None,
+                        help="Total number of frames to extract across all videos")
+    ds_ext.add_argument("--fps", type=float, default=None,
+                        help="Extract this many frames per second of video (alternative to --num-frames)")
+    ds_ext.add_argument("--dataset-dir", "-d", default=None,
+                        help="Dataset folder; frames are saved in <dataset-dir>/raw/")
+    ds_ext.add_argument("--out-dir", "-o", default=None,
+                        help="Custom output directory (overrides --dataset-dir)")
 
     ds_list = ds_sub.add_parser("list", help="List all datasets under the configured root directory")
     ds_list.add_argument("--root", "-r", default=None, help="Root directory to scan (default: resolved from config/env)")

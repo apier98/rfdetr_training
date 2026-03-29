@@ -29,7 +29,7 @@ from .export import export_onnx, export_tensorrt_from_onnx
 from .ingest import ingest_labels_inbox
 from .infer import infer_from_bundle
 from .train import TrainConfig, train
-from .videos import extract_frames
+from .videos import compute_frames_for_fps, extract_frames, scan_video_dir
 from .pathutil import resolve_path
 
 
@@ -304,24 +304,83 @@ def handle_dataset_reset_coco(args) -> int:
     return 0
 
 
+def _print_split_class_stats(split_dir: Path, label: str) -> None:
+    """Print per-class instance/image counts for a COCO split."""
+    from collections import Counter, defaultdict
+    from .jsonutil import load_json
+
+    ann_path = split_dir / "_annotations.coco.json"
+    if not ann_path.exists():
+        return
+    try:
+        coco = load_json(ann_path)
+    except Exception:
+        return
+
+    images = coco.get("images", [])
+    anns = coco.get("annotations", [])
+    cats = {c["id"]: c["name"] for c in coco.get("categories", [])}
+
+    ann_img_ids: set = {int(a["image_id"]) for a in anns}
+    bg_count = sum(1 for im in images if int(im.get("id", -1)) not in ann_img_ids)
+
+    cat_insts: Counter = Counter(int(a["category_id"]) for a in anns)
+    cat_imgs: defaultdict = defaultdict(set)
+    for a in anns:
+        cat_imgs[int(a["category_id"])].add(int(a["image_id"]))
+
+    print(f"  [{label}] {len(images)} images")
+    max_name_len = max((len(n) for n in cats.values()), default=12)
+    for cid, name in sorted(cats.items(), key=lambda x: x[1]):
+        insts = cat_insts.get(cid, 0)
+        imgs = len(cat_imgs.get(cid, set()))
+        print(f"    {name:<{max_name_len}}  {insts:>5} inst  {imgs:>4} imgs")
+    if bg_count > 0:
+        print(f"    {'(background)':<{max_name_len}}             {bg_count:>4} imgs")
+
+
 def handle_dataset_subsample(args) -> int:
     dataset_dir = resolve_path(args.dataset_dir)
     coco_dir = dataset_dir / "coco"
-    res = subsample_coco_split(
-        coco_dir / args.split,
-        fraction=args.fraction,
-        max_images=args.max_images,
-        min_instances_per_class=args.min_instances,
-        seed=args.seed,
-        dry_run=bool(args.dry_run),
-    )
-    if not res.ok:
-        print(f"Error: {res.message}", file=sys.stderr)
-        return 2
-    print(res.message)
-    if res.backup_path is not None:
-        print(f"Backup saved to: {res.backup_path}")
-    return 0
+
+    splits = ["train", "valid", "test"] if args.split == "all" else [args.split]
+    any_error = False
+
+    for split in splits:
+        split_dir = coco_dir / split
+        ann_path = split_dir / "_annotations.coco.json"
+
+        if not ann_path.exists():
+            if args.split == "all":
+                continue  # silently skip missing splits when iterating all
+            print(f"Error: {ann_path} not found", file=sys.stderr)
+            return 2
+
+        print(f"\n── {split} " + "─" * max(0, 40 - len(split)))
+        _print_split_class_stats(split_dir, "before")
+
+        res = subsample_coco_split(
+            split_dir,
+            fraction=args.fraction,
+            max_images=args.max_images,
+            min_instances_per_class=args.min_instances,
+            seed=args.seed,
+            dry_run=bool(args.dry_run),
+        )
+
+        if not res.ok:
+            print(f"  Error: {res.message}", file=sys.stderr)
+            any_error = True
+            continue
+
+        print(f"  {res.message}")
+        if res.backup_path is not None:
+            print(f"  Backup: {res.backup_path}")
+
+        if not args.dry_run:
+            _print_split_class_stats(split_dir, "after")
+
+    return 2 if any_error else 0
 
 
 def handle_dataset_import_coco(args) -> int:
@@ -396,26 +455,57 @@ def handle_dataset_extract_frames(args) -> int:
         print("Error: Either --dataset-dir or --out-dir must be specified.", file=sys.stderr)
         return 2
 
-    video_paths = []
-    for v in args.videos:
+    video_paths: List[Path] = []
+
+    for v in (args.videos or []):
         p = resolve_path(v)
         if not p.exists():
-            print(f"Warning: Video not found: {p}")
-            continue
-        video_paths.append(p)
+            print(f"Warning: Video not found: {p}", file=sys.stderr)
+        else:
+            video_paths.append(p)
+
+    if getattr(args, "videos_dir", None):
+        vd = resolve_path(args.videos_dir)
+        if not vd.is_dir():
+            print(f"Error: --videos-dir is not a directory: {vd}", file=sys.stderr)
+            return 2
+        raw_exts = getattr(args, "ext", None) or "mp4,avi,mov,mkv,webm"
+        exts = {"." + e.strip().lstrip(".").lower() for e in raw_exts.split(",") if e.strip()}
+        found = scan_video_dir(vd, exts)
+        if not found:
+            print(f"Warning: No video files found in {vd} with extensions: {', '.join(sorted(exts))}", file=sys.stderr)
+        video_paths.extend(found)
+
+    # Deduplicate while preserving order
+    seen: set = set()
+    unique: List[Path] = []
+    for p in video_paths:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    video_paths = unique
 
     if not video_paths:
-        print("Error: No valid video files provided.")
+        print("Error: No valid video files provided. Use --videos or --videos-dir.", file=sys.stderr)
         return 2
+
+    fps_val = getattr(args, "fps", None)
+    num_frames_val = getattr(args, "num_frames", None)
+    if fps_val is not None and fps_val > 0:
+        total_frames = compute_frames_for_fps(video_paths, fps_val)
+        print(f"Target: {fps_val} fps → ~{total_frames} frames across {len(video_paths)} video(s)")
+    else:
+        total_frames = int(num_frames_val) if num_frames_val is not None else 100
+        print(f"Target: {total_frames} frames across {len(video_paths)} video(s)")
 
     try:
         cnt = extract_frames(
             video_paths=video_paths,
             out_dir=out_path,
-            total_frames=int(args.num_frames),
+            total_frames=total_frames,
             verbose=True,
         )
-        print(f"Successfully extracted {cnt} frames to {out_path}")
+        print(f"\nExtracted {cnt} frames → {out_path}")
         return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

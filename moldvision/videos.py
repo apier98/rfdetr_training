@@ -2,8 +2,36 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 import cv2
+
+_VIDEO_EXTENSIONS: Set[str] = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".wmv", ".flv"}
+
+
+def scan_video_dir(dir_path: Path, extensions: Optional[Set[str]] = None) -> List[Path]:
+    """Return sorted list of video files in *dir_path* matching *extensions*."""
+    exts = extensions if extensions is not None else _VIDEO_EXTENSIONS
+    return sorted(p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in exts)
+
+
+def compute_frames_for_fps(video_paths: List[Path], fps: float) -> int:
+    """Return the total frame count needed to achieve *fps* extracted frames per second of video.
+
+    For each video the budget is ``ceil(duration_s * fps)``.  Requires OpenCV to
+    read video metadata; videos that cannot be opened are silently skipped.
+    """
+    total = 0
+    for v_path in video_paths:
+        cap = cv2.VideoCapture(str(v_path))
+        if not cap.isOpened():
+            continue
+        vid_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        duration_s = frame_count / vid_fps if vid_fps > 0 else 0.0
+        total += max(1, int(duration_s * fps))
+    return max(1, total)
+
 
 def extract_frames(
     video_paths: List[Path],
