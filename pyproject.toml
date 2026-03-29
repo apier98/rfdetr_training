@@ -8,6 +8,12 @@ version = "0.1.0"
 description = "CLI workspace to create datasets and train defect detection models (ARIA_MoldVision)."
 requires-python = ">=3.9"
 readme = "README.md"
+dependencies = [
+    "Pillow>=9.0",
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "onnxruntime>=1.16",
+]
 
 [project.optional-dependencies]
 label-studio = [

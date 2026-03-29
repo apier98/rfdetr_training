@@ -23,8 +23,15 @@ Integrated system for defect detection models, from dataset preparation to train
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-# Install PyTorch separately to match your CUDA/CPU setup, then:
-pip install -r requirements.txt
+
+# 1. Install PyTorch first — pick the right build for your CUDA/CPU setup:
+#    https://pytorch.org/get-started/locally/
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121  # example: CUDA 12.1
+
+# 2. Install RF-DETR
+pip install rfdetr
+
+# 3. Install aria-moldvision (pulls in Pillow, numpy, opencv, onnxruntime)
 pip install -e .
 ```
 
@@ -331,5 +338,6 @@ See `docs/TOOLS.md` for notes and recommendations.
 
 ## Dependencies
 
-- Install PyTorch separately (CUDA vs CPU builds differ — see [pytorch.org](https://pytorch.org)).
-- Then `pip install -r requirements.txt`
+- Install **PyTorch** separately (CUDA vs CPU builds differ — see [pytorch.org](https://pytorch.org)).
+- Install **rfdetr**: `pip install rfdetr`
+- All other dependencies (`Pillow`, `numpy`, `opencv-python`, `onnxruntime`) are declared in `pyproject.toml` and installed automatically with `pip install -e .` or `pip install -r requirements.txt`.

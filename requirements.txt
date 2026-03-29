@@ -1,0 +1,21 @@
+# Core dependencies for aria-moldvision
+# Install PyTorch FIRST, separately, to match your CUDA/CPU setup:
+#   https://pytorch.org/get-started/locally/
+# Then install rfdetr:
+#   pip install rfdetr
+# Then install these:
+
+Pillow>=9.0
+numpy>=1.24
+opencv-python>=4.8
+onnxruntime>=1.16
+
+# Optional: quantization support
+# onnx>=1.14
+
+# Optional: TensorRT inference (NVIDIA GPU only, install manually)
+# tensorrt
+# pycuda
+
+# Optional: Label Studio pre-labeling backend
+# pip install "aria-moldvision[label-studio]"
