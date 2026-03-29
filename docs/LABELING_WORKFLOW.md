@@ -1,9 +1,15 @@
 # Labeling Workflow — ARIA MoldVision + Label Studio
 
-This document describes how to use Label Studio with a trained MoldVision model
-to pre-label new images. The model runs inference on each image before it
-reaches an annotator, so they only need to correct mistakes rather than draw
-from scratch — typically reducing labeling time by 60–80 %.
+This document covers two labeling paths:
+
+- **ML-assisted** — a trained MoldVision model pre-labels every image before it
+  reaches an annotator, reducing labeling time by 60–80 %. Use this once you
+  have at least one trained model.
+- **Manual** — annotators draw every box or polygon from scratch. Use this for
+  your first dataset or whenever no suitable model is available yet.
+
+Jump to [Manual Labeling (No ML Model Required)](#manual-labeling-no-ml-model-required)
+if you want to skip the ML-assisted path.
 
 ---
 
@@ -255,3 +261,162 @@ $env:LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED = "true"
 $env:LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT = "C:\path\to\your\images"
 label-studio start
 ```
+
+---
+
+## Manual Labeling (No ML Model Required)
+
+Use this workflow when you are collecting your first dataset and have no trained
+model yet, or when you simply want to annotate without running an ML backend.
+
+There are three supported paths depending on the tools you prefer.
+
+---
+
+### Option A — Label Studio standalone (recommended)
+
+This is the same tool used for ML-assisted labeling, just without connecting a
+model backend.
+
+**1. Install and start Label Studio**
+
+```powershell
+pip install label-studio
+label-studio start
+```
+
+Enable local file serving if your images are on disk:
+
+```powershell
+$env:LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED = "true"
+$env:LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT = "C:\path\to\your\images"
+label-studio start
+```
+
+**2. Create a project**
+
+1. Click **Create Project** and give it a name.
+2. Go to **Labeling Setup** and paste the label config for your task.
+
+Bounding box detection:
+
+```xml
+<View>
+  <Image name="image" value="$image"/>
+  <RectangleLabels name="label" toName="image">
+    <Label value="scratch" background="#FF0000"/>
+    <Label value="dent"    background="#00FF00"/>
+    <Label value="stain"   background="#0000FF"/>
+  </RectangleLabels>
+</View>
+```
+
+Instance segmentation (bounding boxes + polygon masks):
+
+```xml
+<View>
+  <Image name="image" value="$image"/>
+  <RectangleLabels name="label" toName="image">
+    <Label value="scratch"/>
+    <Label value="dent"/>
+  </RectangleLabels>
+  <PolygonLabels name="mask" toName="image">
+    <Label value="scratch"/>
+    <Label value="dent"/>
+  </PolygonLabels>
+</View>
+```
+
+Replace label names with your actual class names — they must match what you
+pass to `moldvision dataset create -c`.
+
+**3. Import images and annotate**
+
+Go to **Import**, drag-and-drop your images, and use the Label Stream to draw
+boxes or polygons manually. Do **not** connect an ML backend.
+
+**4. Export annotations**
+
+Go to **Export** → **COCO JSON** → download and extract the `.zip`. You will
+get a `result.json` and an `images/` folder.
+
+**5. Ingest into MoldVision**
+
+```powershell
+# Copy the exported files into labels_inbox
+# Expected layout:
+#   datasets/<UUID>/labels_inbox/coco/images/<image_files>
+#   datasets/<UUID>/labels_inbox/coco/_annotations.coco.json
+
+moldvision dataset ingest -d datasets/<UUID>
+
+# Validate before training
+moldvision dataset validate -d datasets/<UUID> --task detect
+```
+
+---
+
+### Option B — YOLO format label files
+
+Use this if you prefer a text-based format or already have labels from another
+tool (e.g. labelImg, Roboflow) in YOLO format.
+
+Each `.txt` file must have one row per annotation:
+```
+<class_id> <cx> <cy> <w> <h>
+```
+All values are normalised to `[0, 1]`. The class order must match the order of
+classes in your dataset's `METADATA.json`.
+
+```powershell
+# Place images and .txt files together
+# datasets/<UUID>/labels_inbox/yolo/
+#   image1.jpg
+#   image1.txt
+#   image2.jpg
+#   image2.txt
+
+moldvision dataset ingest -d datasets/<UUID> --yolo-task detect
+
+# For segmentation tasks
+moldvision dataset ingest -d datasets/<UUID> --yolo-task seg
+```
+
+---
+
+### Option C — Any COCO-compatible annotation tool
+
+Tools such as **CVAT**, **VGG Image Annotator (VIA)**, or **Roboflow** can
+export COCO JSON directly. The ingest pipeline accepts any valid COCO JSON file.
+
+1. Annotate in your preferred tool.
+2. Export as **COCO JSON** (with an `images/` folder alongside the `.json`).
+3. Drop everything into `datasets/<UUID>/labels_inbox/coco/`.
+4. Run `moldvision dataset ingest -d datasets/<UUID>`.
+
+---
+
+### After manual labeling — training your first model
+
+Once your first labeled dataset is ingested, you can train a baseline model:
+
+```powershell
+moldvision train `
+  --dataset-dir datasets/<UUID> `
+  --epochs 80 `
+  --size nano
+```
+
+After training, create a bundle and switch to the ML-assisted workflow to
+speed up future labeling rounds:
+
+```powershell
+moldvision bundle `
+  --dataset-dir datasets/<UUID> `
+  --weights datasets/<UUID>/models/checkpoint_portable.pth `
+  --model-name "My Detector" `
+  --model-version 1.0.0
+```
+
+Then follow [Step 3](#step-3--start-the-ml-pre-labeling-backend) onwards in the
+ML-assisted workflow above.
