@@ -283,7 +283,7 @@ pip install "aria-moldvision[label-studio]"
 **Start the pre-labeling backend:**
 ```powershell
 $env:MOLDVISION_BUNDLE_DIR = "datasets/<UUID>/deploy/<bundle>"
-label-studio-ml start moldvision\label_studio_backend.py --port 9090
+python -m moldvision.label_studio_backend --port 9090
 ```
 
 **Then in Label Studio:**

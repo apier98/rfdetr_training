@@ -9,14 +9,21 @@ Install dependencies::
 
     pip install "aria-moldvision[label-studio]"
 
-Start the backend::
+Start the backend (two options):
 
-    MOLDVISION_BUNDLE_DIR=/path/to/bundle label-studio-ml start moldvision/label_studio_backend.py -p 9090
+Option A — run directly with Python (simplest)::
 
-Or with an explicit bundle dir flag::
+    # Windows PowerShell
+    $env:MOLDVISION_BUNDLE_DIR = "datasets/<UUID>/deploy/<bundle>"
+    python -m moldvision.label_studio_backend --port 9090
 
-    label-studio-ml start moldvision/label_studio_backend.py \\
-        --with bundle_dir=/path/to/bundle --port 9090
+Option B — use the label-studio-ml CLI (one-time init required)::
+
+    # One-time setup
+    label-studio-ml init moldvision-backend --script "moldvision/label_studio_backend.py:MoldVisionMLBackend"
+    # Start (repeat as needed)
+    $env:MOLDVISION_BUNDLE_DIR = "datasets/<UUID>/deploy/<bundle>"
+    label-studio-ml start moldvision-backend --port 9090
 
 Then in Label Studio → Project Settings → Machine Learning → Add Model → http://localhost:9090
 
@@ -323,20 +330,32 @@ class MoldVisionMLBackend(LabelStudioMLBase):
     annotation types (``rectanglelabels`` and/or ``polygonlabels``).
     """
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._init_kwargs: dict = kwargs
+        self._runner: Optional["_OnnxBundleRunner"] = None
+        self.setup()
+
     def setup(self) -> None:
         bundle_dir_str: str = (
             os.environ.get(BUNDLE_DIR_ENV, "")
-            or self.get("bundle_dir") or ""  # type: ignore[attr-defined]
+            or self._init_kwargs.get("bundle_dir", "") or ""
         )
         if not bundle_dir_str:
-            raise RuntimeError(
-                f"Bundle directory not configured. Set the {BUNDLE_DIR_ENV!r} environment variable "
-                "or pass --with bundle_dir=/path/to/bundle when starting the backend."
+            _log.error(
+                "Bundle directory not configured. Set the %r environment variable "
+                "or pass --with bundle_dir=/path/to/bundle when starting the backend.",
+                BUNDLE_DIR_ENV,
             )
-        self._runner = _OnnxBundleRunner(Path(bundle_dir_str))
+            return
+        try:
+            self._runner = _OnnxBundleRunner(Path(bundle_dir_str))
+        except Exception:
+            _log.exception("Failed to load bundle from %s", bundle_dir_str)
+            return
 
         # Allow score threshold override from backend params.
-        override = self.get("score_threshold")  # type: ignore[attr-defined]
+        override = self._init_kwargs.get("score_threshold")
         if override is not None:
             try:
                 self._runner.score_threshold = float(override)
@@ -352,6 +371,10 @@ class MoldVisionMLBackend(LabelStudioMLBase):
 
     def predict(self, tasks: list[dict], context: Any = None, **kwargs: Any) -> list[dict]:
         """Return pre-annotations for each task in Label Studio format."""
+        if self._runner is None:
+            raise RuntimeError(
+                f"Bundle not loaded. Set the {BUNDLE_DIR_ENV!r} environment variable before starting the backend."
+            )
         # Discover tag names from the project's label configuration once per call.
         rect_from, rect_to = self._find_control_tag("RectangleLabels", fallback_from="label", fallback_to="image")
         poly_from, poly_to = self._find_control_tag("PolygonLabels", fallback_from="mask", fallback_to="image")
@@ -365,7 +388,7 @@ class MoldVisionMLBackend(LabelStudioMLBase):
                 continue
 
             try:
-                image_path = self.get_local_path(image_url, task_id=task.get("id"))  # type: ignore[attr-defined]
+                image_path = self.get_local_path(image_url)  # type: ignore[attr-defined]
                 pil_image = Image.open(image_path).convert("RGB")
             except Exception as exc:
                 _log.error("Failed to load image for task %s: %s", task.get("id"), exc)
@@ -435,3 +458,18 @@ class MoldVisionMLBackend(LabelStudioMLBase):
         except Exception:
             pass
         return fallback_from, fallback_to
+
+
+if __name__ == "__main__":
+    import argparse as _argparse
+    import tempfile as _tempfile
+    from label_studio_ml.api import init_app  # type: ignore
+
+    _parser = _argparse.ArgumentParser(description="ARIA MoldVision — Label Studio ML backend")
+    _parser.add_argument("--port", type=int, default=9090, help="Port to listen on (default: 9090)")
+    _parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind (default: 0.0.0.0)")
+    _args, _ = _parser.parse_known_args()
+
+    _app = init_app(MoldVisionMLBackend, model_dir=_tempfile.mkdtemp(prefix="moldvision_ml_"))
+    print(f"Starting MoldVision ML backend on http://{_args.host}:{_args.port}")
+    _app.run(host=_args.host, port=_args.port, debug=False)

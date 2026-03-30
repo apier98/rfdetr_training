@@ -64,22 +64,28 @@ Note the output bundle path (e.g. `datasets/<UUID>/deploy/checkpoint_portable_20
 
 ## Step 3 — Start the ML pre-labeling backend
 
+**Option A — run directly with Python (recommended, simplest)**
+
 ```powershell
 $env:MOLDVISION_BUNDLE_DIR = "datasets/<UUID>/deploy/checkpoint_portable_20260329_120000Z"
-label-studio-ml start moldvision\label_studio_backend.py --port 9090
+python -m moldvision.label_studio_backend --port 9090
 ```
 
-On Linux / macOS:
+Linux / macOS:
 ```bash
 MOLDVISION_BUNDLE_DIR="datasets/<UUID>/deploy/checkpoint_portable_20260329_120000Z" \
-    label-studio-ml start moldvision/label_studio_backend.py --port 9090
+    python -m moldvision.label_studio_backend --port 9090
 ```
 
-Or pass the bundle dir as a parameter:
-```bash
-label-studio-ml start moldvision/label_studio_backend.py \
-    --with bundle_dir=datasets/<UUID>/deploy/checkpoint_portable_20260329_120000Z \
-    --port 9090
+**Option B — use the label-studio-ml CLI (one-time `init` required)**
+
+```powershell
+# One-time setup: creates a moldvision-backend/ project folder
+label-studio-ml init moldvision-backend --script "moldvision\label_studio_backend.py:MoldVisionMLBackend"
+
+# Start (repeat whenever you need to restart the backend)
+$env:MOLDVISION_BUNDLE_DIR = "datasets/<UUID>/deploy/checkpoint_portable_20260329_120000Z"
+label-studio-ml start moldvision-backend --port 9090
 ```
 
 Verify it is running:
@@ -232,10 +238,10 @@ session without retraining:
 
 ```powershell
 $env:MOLDVISION_BUNDLE_DIR = "datasets/<UUID>/deploy/<bundle>"
-label-studio-ml start moldvision\label_studio_backend.py `
-    --with score_threshold=0.6 `
-    --port 9090
+python -m moldvision.label_studio_backend --port 9090
 ```
+
+The threshold can be overridden at runtime via the Label Studio UI: **Settings → Machine Learning → your backend → ⚙ → set `score_threshold`**.
 
 Lower the threshold to see more (noisier) pre-labels; raise it to see fewer
 but higher-confidence ones.
