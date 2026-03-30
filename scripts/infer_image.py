@@ -3,6 +3,7 @@
 
 Usage example:
   python scripts/infer_image.py --image data/val/0001.jpg --weights datasets/<UUID>/models/checkpoint_best_regular.pth --task seg --output out.png --classes-file datasets/<UUID>/METADATA.json
+  python scripts/infer_image.py --backend onnx --onnx-model model.onnx --image data/val/0001.jpg --output out.png
 
 The script is flexible: pick `--task seg` or `detect`, `--size` (for detect), `--threshold`, `--mask-thresh`, and device.
 """
@@ -29,7 +30,7 @@ from infer_helpers import (
     detections_to_json,
     read_checkpoint_args,
 )
-from infer_webcam import run_inference
+from infer_webcam import run_inference, load_onnx_session, onnx_input_hw, run_onnx_frame
 
 
 def _call_predict_best_effort(predict_fn, image: Image.Image, *, threshold: float):
@@ -128,7 +129,7 @@ def draw_mask_contours(frame: np.ndarray, masks: List[np.ndarray], labels: List[
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ARIA_MoldVision: Run inference on a single image and overlay masks")
     p.add_argument("--image", "-i", required=True, help="Path to image file")
-    p.add_argument("--weights", "-w", required=True, help="Path to model checkpoint (.pth)")
+    p.add_argument("--weights", "-w", default=None, help="Path to model checkpoint (.pth); required when --backend pytorch")
     p.add_argument("--task", choices=["detect", "seg"], default="seg", help="Task: detect or seg (default: seg)")
     p.add_argument("--size", choices=["nano", "small", "base", "medium"], default="nano", help="Model size for detection (ignored for seg)")
     p.add_argument("--num-classes", type=int, default=None, help="Override number of classes when instantiating detect model")
@@ -155,6 +156,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--output", "-o", default=None, help="Path to save overlayed output image (if omitted, will display window)")
     p.add_argument("--verbose", action="store_true")
+    # ONNX backend
+    p.add_argument("--backend", choices=["pytorch", "onnx"], default="pytorch",
+                   help="inference backend: pytorch (default) or onnx")
+    p.add_argument("--onnx-model", type=str, default=None,
+                   help="path to ONNX model file (required when --backend onnx)")
     return p.parse_args()
 
 
@@ -162,6 +168,50 @@ def main():
     args = parse_args()
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     class_names = load_class_names(args.classes_file) if args.classes_file else []
+
+    if args.backend == "onnx":
+        if not args.onnx_model:
+            print("Error: --onnx-model is required when --backend onnx")
+            return
+        session = load_onnx_session(args.onnx_model, args.device)
+        target_h, target_w = onnx_input_hw(session)
+
+        img_p = Path(args.image)
+        if not img_p.exists():
+            raise SystemExit(f"Image not found: {img_p}")
+        frame_bgr = cv2.imread(str(img_p))
+        if frame_bgr is None:
+            raise SystemExit(f"Failed to read image: {img_p}")
+
+        boxes, scores, labels, masks = run_onnx_frame(
+            session, frame_bgr, target_h, target_w,
+            args.threshold, args.task == "seg", args.mask_thresh,
+        )
+
+        disp = frame_bgr.copy()
+        if args.task == "seg" and masks:
+            overlay_masks(disp, masks, labels, alpha=args.mask_alpha)
+        draw_detections(disp, boxes, scores, labels, class_names)
+
+        if args.output:
+            out_p = Path(args.output)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out_p), disp)
+            print(f"Wrote overlay to: {out_p}")
+        else:
+            cv2.imshow("ARIA_MoldVision", disp)
+            print("Press any key in the image window to exit")
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+
+        det_json = detections_to_json(boxes, scores, labels, class_names=class_names, image_id=str(img_p.name), score_thresh=args.threshold)
+        print(json.dumps(det_json, indent=2))
+        return
+
+    if not args.weights:
+        print("Error: --weights is required when --backend pytorch")
+        return
+
     ckpt_args = read_checkpoint_args(args.weights)
     model_size = args.size
     if args.task == "seg":

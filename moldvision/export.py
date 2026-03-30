@@ -271,30 +271,32 @@ def export_onnx(
         `List[int]` in the graph and fails ONNX export.
         """
 
+        LayerNorm = None
+        orig_forward = None
+
         try:
             from rfdetr.models.backbone import projector as _proj  # type: ignore
 
             LayerNorm = getattr(_proj, "LayerNorm", None)
-            if LayerNorm is None:
-                yield
-                return
+            if LayerNorm is not None:
+                orig_forward = LayerNorm.forward
 
-            orig_forward = LayerNorm.forward
+                def forward(self, x):
+                    x = x.permute(0, 2, 3, 1)
+                    x = F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+                    x = x.permute(0, 3, 1, 2)
+                    return x
 
-            def forward(self, x):
-                x = x.permute(0, 2, 3, 1)
-                x = F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-                x = x.permute(0, 3, 1, 2)
-                return x
-
-            LayerNorm.forward = forward
-            try:
-                yield
-            finally:
-                LayerNorm.forward = orig_forward
+                LayerNorm.forward = forward
         except Exception:
             # If rfdetr isn't installed or the module path differs, just skip.
+            LayerNorm = None
+
+        try:
             yield
+        finally:
+            if LayerNorm is not None and orig_forward is not None:
+                LayerNorm.forward = orig_forward
 
     @contextlib.contextmanager
     def _patch_topk_for_tensorrt_onnx():

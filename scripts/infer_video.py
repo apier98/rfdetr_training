@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Run RF-DETR inference on a video and optionally save overlayed output."""
+"""Run RF-DETR inference on a video and optionally save overlayed output.
+
+Supports --backend pytorch (default) or --backend onnx with --onnx-model.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +25,9 @@ from infer_helpers import (
 from infer_webcam import (
     draw_detections,
     load_class_names,
+    load_onnx_session,
+    onnx_input_hw,
+    run_onnx_frame,
 )
 from moldvision.checkpoints import load_checkpoint_weights
 from moldvision.postprocess import letterbox_pil, parse_model_output_generic, unletterbox_mask, unletterbox_xyxy
@@ -34,7 +40,7 @@ import numpy as np
 def parse_args():
     p = argparse.ArgumentParser(description="ARIA_MoldVision: Run inference on a video file")
     p.add_argument("--video", "-i", required=True, help="input video path")
-    p.add_argument("--weights", "-w", required=True, help="path to model weights (.pth)")
+    p.add_argument("--weights", "-w", default=None, help="path to model weights (.pth); required when --backend pytorch")
     p.add_argument("--task", choices=["detect", "seg"], default="detect", help="inference task")
     p.add_argument(
         "--size",
@@ -64,6 +70,11 @@ def parse_args():
         default=None,
         help="directory where the overlayed video will be saved with an auto-generated filename",
     )
+    # ONNX backend
+    p.add_argument("--backend", choices=["pytorch", "onnx"], default="pytorch",
+                   help="inference backend: pytorch (default) or onnx")
+    p.add_argument("--onnx-model", type=str, default=None,
+                   help="path to ONNX model file (required when --backend onnx)")
     return p.parse_args()
 
 
@@ -149,66 +160,80 @@ def main():
 
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
-    ckpt_args = read_checkpoint_args(args.weights)
     class_names = load_class_names(args.classes_file) if args.classes_file else []
-    if not class_names and ckpt_args is not None:
-        class_names = list(getattr(ckpt_args, "class_names", []) or [])
 
-    model_size = args.size
-    detected_size = detect_model_size_from_checkpoint(args.weights, checkpoint_key=args.checkpoint_key)
-    if args.task == "seg" and detected_size:
-        model_size = detected_size
-        print(f"Using segmentation model size from checkpoint: {model_size}")
+    if args.backend == "onnx":
+        if not args.onnx_model:
+            print("Error: --onnx-model is required when --backend onnx")
+            return
+        session = load_onnx_session(args.onnx_model, args.device)
+        onnx_target_h, onnx_target_w = onnx_input_hw(session)
+        model = None
+        module_for_torch = None
+        infer_resolution = onnx_target_w
+    else:
+        if not args.weights:
+            print("Error: --weights is required when --backend pytorch")
+            return
+        ckpt_args = read_checkpoint_args(args.weights)
+        if not class_names and ckpt_args is not None:
+            class_names = list(getattr(ckpt_args, "class_names", []) or [])
 
-    model_num_classes = args.num_classes
-    if model_num_classes is None and class_names:
-        model_num_classes = int(len(class_names))
-    if model_num_classes is None and ckpt_args is not None:
-        ck_num_classes = getattr(ckpt_args, "num_classes", None)
-        if isinstance(ck_num_classes, int) and ck_num_classes > 0:
-            model_num_classes = int(ck_num_classes)
+        model_size = args.size
+        detected_size = detect_model_size_from_checkpoint(args.weights, checkpoint_key=args.checkpoint_key)
+        if args.task == "seg" and detected_size:
+            model_size = detected_size
+            print(f"Using segmentation model size from checkpoint: {model_size}")
 
-    infer_resolution = 640
-    if ckpt_args is not None:
-        ck_resolution = getattr(ckpt_args, "resolution", None)
-        if isinstance(ck_resolution, int) and ck_resolution > 0:
-            infer_resolution = int(ck_resolution)
-    if args.verbose:
-        print(f"Inference config: size={model_size} num_classes={model_num_classes} resolution={infer_resolution}")
+        model_num_classes = args.num_classes
+        if model_num_classes is None and class_names:
+            model_num_classes = int(len(class_names))
+        if model_num_classes is None and ckpt_args is not None:
+            ck_num_classes = getattr(ckpt_args, "num_classes", None)
+            if isinstance(ck_num_classes, int) and ck_num_classes > 0:
+                model_num_classes = int(ck_num_classes)
 
-    model = instantiate_model(size=model_size, num_classes=model_num_classes, task=args.task)
-    lr = load_checkpoint_weights(
-        model,
-        args.weights,
-        device,
-        checkpoint_key=args.checkpoint_key,
-        allow_replace_model=args.use_checkpoint_model,
-        strict=False,
-        verbose=args.verbose,
-    )
-    if lr.replacement_model is not None:
-        model = lr.replacement_model
-    if not lr.ok:
-        print(f"Warning: could not load weights cleanly: {lr.message}")
+        infer_resolution = 640
+        if ckpt_args is not None:
+            ck_resolution = getattr(ckpt_args, "resolution", None)
+            if isinstance(ck_resolution, int) and ck_resolution > 0:
+                infer_resolution = int(ck_resolution)
+        if args.verbose:
+            print(f"Inference config: size={model_size} num_classes={model_num_classes} resolution={infer_resolution}")
 
-    try:
-        model.to(device)
-    except Exception:
-        pass
-    try:
-        model.eval()
-    except Exception:
-        pass
-    optimize = getattr(model, "optimize_for_inference", None)
-    if callable(optimize):
+        model = instantiate_model(size=model_size, num_classes=model_num_classes, task=args.task)
+        lr = load_checkpoint_weights(
+            model,
+            args.weights,
+            device,
+            checkpoint_key=args.checkpoint_key,
+            allow_replace_model=args.use_checkpoint_model,
+            strict=False,
+            verbose=args.verbose,
+        )
+        if lr.replacement_model is not None:
+            model = lr.replacement_model
+        if not lr.ok:
+            print(f"Warning: could not load weights cleanly: {lr.message}")
+
         try:
-            optimize(compile=False, batch_size=1)
+            model.to(device)
         except Exception:
             pass
-    try:
-        module_for_torch = unwrap_torch_module(model)
-    except Exception:
-        module_for_torch = model if hasattr(model, "__call__") else None
+        try:
+            model.eval()
+        except Exception:
+            pass
+        optimize = getattr(model, "optimize_for_inference", None)
+        if callable(optimize):
+            try:
+                optimize(compile=False, batch_size=1)
+            except Exception:
+                pass
+        try:
+            module_for_torch = unwrap_torch_module(model)
+        except Exception:
+            module_for_torch = model if hasattr(model, "__call__") else None
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -236,64 +261,71 @@ def main():
                 continue
 
             h, w = frame.shape[:2]
-            out = None
-            last_exc = None
 
-            try:
-                out = run_official_predict(model, frame, threshold=float(args.threshold))
-            except Exception as e:
-                last_exc = e
-
-            if out is not None:
-                boxes, scores, labels, masks = parse_model_output_generic(
-                    out,
-                    img_w=w,
-                    img_h=h,
-                    score_thresh=args.threshold,
-                    want_masks=(args.task == "seg"),
-                    mask_thresh=args.mask_thresh,
-                    topk=300,
+            if args.backend == "onnx":
+                boxes, scores, labels, masks = run_onnx_frame(
+                    session, frame, onnx_target_h, onnx_target_w,
+                    args.threshold, args.task == "seg", args.mask_thresh,
                 )
             else:
-                tensor, lb = preprocess_frame_to_tensor(
-                    frame,
-                    device,
-                    target_w=int(infer_resolution),
-                    target_h=int(infer_resolution),
-                )
-                if module_for_torch is not None:
-                    try:
-                        with torch.inference_mode():
-                            out = module_for_torch(tensor)
-                    except Exception as e:
-                        last_exc = e
-                if out is None:
-                    for name in ("infer", "inference", "forward", "detect"):
-                        fn = getattr(model, name, None)
-                        if not callable(fn):
-                            continue
+                out = None
+                last_exc = None
+
+                try:
+                    out = run_official_predict(model, frame, threshold=float(args.threshold))
+                except Exception as e:
+                    last_exc = e
+
+                if out is not None:
+                    boxes, scores, labels, masks = parse_model_output_generic(
+                        out,
+                        img_w=w,
+                        img_h=h,
+                        score_thresh=args.threshold,
+                        want_masks=(args.task == "seg"),
+                        mask_thresh=args.mask_thresh,
+                        topk=300,
+                    )
+                else:
+                    tensor, lb = preprocess_frame_to_tensor(
+                        frame,
+                        device,
+                        target_w=int(infer_resolution),
+                        target_h=int(infer_resolution),
+                    )
+                    if module_for_torch is not None:
                         try:
                             with torch.inference_mode():
-                                out = fn(tensor)
-                            break
+                                out = module_for_torch(tensor)
                         except Exception as e:
                             last_exc = e
-                if out is None:
-                    raise RuntimeError(f"Inference failed: {last_exc}")
+                    if out is None:
+                        for name in ("infer", "inference", "forward", "detect"):
+                            fn = getattr(model, name, None)
+                            if not callable(fn):
+                                continue
+                            try:
+                                with torch.inference_mode():
+                                    out = fn(tensor)
+                                break
+                            except Exception as e:
+                                last_exc = e
+                    if out is None:
+                        raise RuntimeError(f"Inference failed: {last_exc}")
 
-                boxes, scores, labels, masks = parse_model_output_generic(
-                    out,
-                    img_w=int(infer_resolution),
-                    img_h=int(infer_resolution),
-                    score_thresh=args.threshold,
-                    want_masks=(args.task == "seg"),
-                    mask_thresh=args.mask_thresh,
-                    topk=300,
-                )
-                boxes = [unletterbox_xyxy(b, lb=lb, orig_w=w, orig_h=h) for b in boxes]
-                if masks is not None:
-                    masks = [unletterbox_mask(m, lb=lb, orig_w=w, orig_h=h) for m in masks]
-                    masks = [m for m in masks if m is not None]
+                    boxes, scores, labels, masks = parse_model_output_generic(
+                        out,
+                        img_w=int(infer_resolution),
+                        img_h=int(infer_resolution),
+                        score_thresh=args.threshold,
+                        want_masks=(args.task == "seg"),
+                        mask_thresh=args.mask_thresh,
+                        topk=300,
+                    )
+                    boxes = [unletterbox_xyxy(b, lb=lb, orig_w=w, orig_h=h) for b in boxes]
+                    if masks is not None:
+                        masks = [unletterbox_mask(m, lb=lb, orig_w=w, orig_h=h) for m in masks]
+                        masks = [m for m in masks if m is not None]
 
             if args.task == "seg" and boxes and not masks and not warned_no_masks:
                 print(

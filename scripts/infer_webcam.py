@@ -12,6 +12,9 @@ Examples:
 
   # Segmentation
   python scripts/infer_webcam.py --task seg --camera 0 --weights "datasets/<UUID>/models/best.pth" --threshold 0.3 --mask-alpha 0.45
+
+  # ONNX backend
+  python scripts/infer_webcam.py --backend onnx --onnx-model model.onnx --camera 0
 """
 
 from __future__ import annotations
@@ -57,6 +60,11 @@ def parse_args():
     # Segmentation visualization
     p.add_argument("--mask-alpha", type=float, default=0.45, help="mask overlay alpha in [0..1], seg only")
     p.add_argument("--mask-thresh", type=float, default=0.5, help="threshold for mask logits/probabilities, seg only")
+    # ONNX backend
+    p.add_argument("--backend", choices=["pytorch", "onnx"], default="pytorch",
+                   help="inference backend: pytorch (default) or onnx")
+    p.add_argument("--onnx-model", type=str, default=None,
+                   help="path to ONNX model file (required when --backend onnx)")
     return p.parse_args()
 
 
@@ -668,66 +676,223 @@ def draw_detections(frame: np.ndarray, boxes: List[List[float]], scores: List[fl
         cv2.putText(frame, text, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
 
+def load_onnx_session(onnx_path: str, device_str: Optional[str]):
+    """Create an onnxruntime InferenceSession, preferring CUDA if available."""
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        raise RuntimeError("onnxruntime is not installed. Run: pip install onnxruntime-gpu")
+    providers = ["CPUExecutionProvider"]
+    try:
+        available = set(ort.get_available_providers())
+    except Exception:
+        available = set()
+    wants_cuda = device_str is None or str(device_str).lower().startswith("cuda")
+    if wants_cuda and "CUDAExecutionProvider" in available:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    session = ort.InferenceSession(onnx_path, providers=providers)
+    print(f"ONNX Runtime providers in use: {session.get_providers()}")
+    # Warn when loading an fp16 model without TensorRT: onnxruntime's CUDA provider
+    # lacks fp16 kernels for some ops (Sqrt, Tile), causing Memcpy roundtrips that
+    # are slower than fp32 on CUDA. Use model.onnx (fp32) for onnxruntime inference;
+    # fp16 ONNX is designed as an intermediate for TensorRT export.
+    try:
+        inp_type = str(session.get_inputs()[0].type).lower()
+        using_cuda = any("cuda" in p.lower() for p in session.get_providers())
+        using_trt = any("tensorrt" in p.lower() for p in session.get_providers())
+        if ("float16" in inp_type or "fp16" in inp_type) and using_cuda and not using_trt:
+            print(
+                "Warning: fp16 ONNX model loaded with CUDAExecutionProvider but without TensorRT. "
+                "Some ops (Sqrt, Tile) lack fp16 CUDA kernels and will fall back to CPU with "
+                "Memcpy overhead, making fp16 slower than fp32. "
+                "Use model.onnx (fp32) for onnxruntime inference, or export a TensorRT engine for fp16."
+            )
+    except Exception:
+        pass
+    return session
+
+
+def onnx_input_hw(session, default_h: int = 560, default_w: int = 560) -> Tuple[int, int]:
+    """Return (target_h, target_w) from the session's first input shape."""
+    target_h, target_w = default_h, default_w
+    try:
+        shape = session.get_inputs()[0].shape
+        if len(shape) >= 4:
+            if isinstance(shape[2], int) and shape[2] > 0:
+                target_h = int(shape[2])
+            if isinstance(shape[3], int) and shape[3] > 0:
+                target_w = int(shape[3])
+    except Exception:
+        pass
+    return target_h, target_w
+
+
+def preprocess_frame_for_onnx(frame_bgr: np.ndarray, target_h: int, target_w: int):
+    """BGR frame → (NCHW float32 array, Letterbox, orig_h, orig_w)."""
+    from moldvision.postprocess import letterbox_pil, normalize_image_nchw
+    if frame_bgr.ndim == 2:
+        frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_GRAY2BGR)
+    elif frame_bgr.ndim == 3 and frame_bgr.shape[2] == 4:
+        frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_BGRA2BGR)
+    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    pil = Image.fromarray(rgb)
+    orig_w, orig_h = pil.width, pil.height
+    pil_lb, lb = letterbox_pil(pil, target_w=target_w, target_h=target_h)
+    arr = np.asarray(pil_lb, dtype=np.float32) / 255.0
+    arr = np.transpose(arr, (2, 0, 1))[None, ...]
+    arr = np.asarray(normalize_image_nchw(arr), dtype=np.float32)
+    return arr, lb, orig_h, orig_w
+
+
+def run_onnx_frame(
+    session,
+    frame_bgr: np.ndarray,
+    target_h: int,
+    target_w: int,
+    score_thresh: float,
+    want_masks: bool,
+    mask_thresh: float,
+) -> Tuple[List[List[float]], List[float], List[int], Optional[List[np.ndarray]]]:
+    """Run ONNX inference on one BGR frame. Returns (boxes, scores, labels, masks)."""
+    from moldvision.postprocess import parse_model_output_generic, unletterbox_xyxy, unletterbox_mask
+    arr, lb, orig_h, orig_w = preprocess_frame_for_onnx(frame_bgr, target_h, target_w)
+    # handle fp16 models
+    try:
+        t = str(session.get_inputs()[0].type).lower()
+        if "float16" in t or "fp16" in t:
+            arr = arr.astype(np.float16, copy=False)
+    except Exception:
+        pass
+    try:
+        inp = session.get_inputs()[0]
+        output_names = [o.name for o in session.get_outputs()]
+        raw = session.run(output_names, {inp.name: arr})
+        out = {name: val for name, val in zip(output_names, raw)}
+    except Exception as e:
+        print(f"ONNX inference failed: {e}")
+        return [], [], [], None
+    boxes, scores, labels, masks = parse_model_output_generic(
+        out,
+        img_w=target_w,
+        img_h=target_h,
+        score_thresh=score_thresh,
+        want_masks=want_masks,
+        mask_thresh=mask_thresh,
+    )
+    boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
+    if want_masks and masks:
+        masks = [unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=mask_thresh) for m in masks]
+    return boxes, scores, labels, masks
+
+
 def main():
     args = parse_args()
+
+    if args.backend == "onnx" and not args.onnx_model:
+        print("Error: --onnx-model is required when --backend onnx")
+        return
+
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
 
     class_names = load_class_names(args.classes_file) if args.classes_file else []
 
-    if args.task == "seg" and args.size != "nano":
-        print("Note: --size is ignored for --task seg")
+    if args.backend == "onnx":
+        session = load_onnx_session(args.onnx_model, args.device)
+        target_h, target_w = onnx_input_hw(session)
 
-    print("Instantiating model...")
-    model = instantiate_model(args.task, args.size, args.num_classes)
-
-    if args.weights:
-        ok, replacement = try_load_weights(
-            model, args.weights, device,
-            checkpoint_key=args.checkpoint_key,
-            verbose=args.verbose,
-            allow_replace_model=args.use_checkpoint_model
-        )
-        if not ok:
-            print("Warning: could not load weights. Inference may fail or use random weights.")
-        if replacement is not None:
-            if args.verbose:
-                print(f"Replacing instantiated model with checkpoint object of type {type(replacement)}")
-            model = replacement
-
-    # pick torch module for device placement
-    module_for_torch = None
-    if hasattr(model, "to") and callable(getattr(model, "to")):
-        module_for_torch = model
+        def run_frame_fn(frame_bgr):
+            return run_onnx_frame(
+                session, frame_bgr, target_h, target_w,
+                args.threshold, args.task == "seg", args.mask_thresh,
+            )
     else:
-        for attr in ("model", "net", "network", "module", "detector", "backbone"):
-            inner = getattr(model, attr, None)
-            if inner is not None and hasattr(inner, "to") and callable(getattr(inner, "to")):
-                module_for_torch = inner
+        if args.task == "seg" and args.size != "nano":
+            print("Note: --size is ignored for --task seg")
+
+        print("Instantiating model...")
+        model = instantiate_model(args.task, args.size, args.num_classes)
+
+        if args.weights:
+            ok, replacement = try_load_weights(
+                model, args.weights, device,
+                checkpoint_key=args.checkpoint_key,
+                verbose=args.verbose,
+                allow_replace_model=args.use_checkpoint_model
+            )
+            if not ok:
+                print("Warning: could not load weights. Inference may fail or use random weights.")
+            if replacement is not None:
                 if args.verbose:
-                    print(f"Using inner module '{attr}' for device placement")
-                break
+                    print(f"Replacing instantiated model with checkpoint object of type {type(replacement)}")
+                model = replacement
 
-    if module_for_torch is not None:
-        try:
-            module_for_torch.to(device)
-        except Exception as e:
-            print(f"Warning: moving module to device failed: {e}. Falling back to CPU.")
+        module_for_torch = None
+        if hasattr(model, "to") and callable(getattr(model, "to")):
+            module_for_torch = model
+        else:
+            for attr in ("model", "net", "network", "module", "detector", "backbone"):
+                inner = getattr(model, attr, None)
+                if inner is not None and hasattr(inner, "to") and callable(getattr(inner, "to")):
+                    module_for_torch = inner
+                    if args.verbose:
+                        print(f"Using inner module '{attr}' for device placement")
+                    break
+
+        if module_for_torch is not None:
+            try:
+                module_for_torch.to(device)
+            except Exception as e:
+                print(f"Warning: moving module to device failed: {e}. Falling back to CPU.")
+                device = torch.device("cpu")
+            try:
+                module_for_torch.eval()
+            except Exception:
+                pass
+        else:
+            if args.verbose:
+                print("Warning: could not find an inner torch module to move to device; using CPU.")
             device = torch.device("cpu")
-        try:
-            module_for_torch.eval()
-        except Exception:
-            pass
-    else:
-        if args.verbose:
-            print("Warning: could not find an inner torch module to move to device; using CPU.")
-        device = torch.device("cpu")
 
-    if hasattr(model, "to") and callable(getattr(model, "to")):
-        try:
-            model.to(device)
-        except Exception:
-            pass
+        if hasattr(model, "to") and callable(getattr(model, "to")):
+            try:
+                model.to(device)
+            except Exception:
+                pass
+
+        def run_frame_fn(frame_bgr):
+            h, w = frame_bgr.shape[:2]
+            tensor = preprocess_frame_to_tensor(frame_bgr, device)
+            with torch.no_grad():
+                try:
+                    out = run_inference(model, module_for_torch, tensor)
+                except Exception as e:
+                    if args.verbose:
+                        import traceback
+                        traceback.print_exc()
+                    print(f"Model forward failed: {e}")
+                    out = None
+
+            if out is None:
+                return [], [], [], None
+
+            if args.verbose:
+                try:
+                    if isinstance(out, dict):
+                        print("Output keys:", list(out.keys()))
+                    elif isinstance(out, torch.Tensor):
+                        print("Tensor shape:", out.shape)
+                    else:
+                        print("Output type:", type(out))
+                except Exception:
+                    pass
+
+            return parse_detections(
+                out, w, h,
+                score_thresh=args.threshold,
+                want_masks=(args.task == "seg"),
+                mask_thresh=args.mask_thresh,
+            )
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -742,50 +907,12 @@ def main():
                 print("Failed to read frame from camera")
                 break
 
-            h, w = frame.shape[:2]
             start = time.time()
-            tensor = preprocess_frame_to_tensor(frame, device)
-
-            with torch.no_grad():
-                try:
-                    out = run_inference(model, module_for_torch, tensor)
-                except Exception as e:
-                    if args.verbose:
-                        import traceback
-                        traceback.print_exc()
-                    print(f"Model forward failed: {e}")
-                    out = None
-
-            boxes: List[List[float]] = []
-            scores: List[float] = []
-            labels: List[int] = []
-            masks: Optional[List[np.ndarray]] = None
-
-            if out is not None:
-                if args.verbose:
-                    try:
-                        if isinstance(out, dict):
-                            print("Output keys:", list(out.keys()))
-                        elif isinstance(out, torch.Tensor):
-                            print("Tensor shape:", out.shape)
-                        else:
-                            print("Output type:", type(out))
-                    except Exception:
-                        pass
-
-                boxes, scores, labels, masks = parse_detections(
-                    out, w, h,
-                    score_thresh=args.threshold,
-                    want_masks=(args.task == "seg"),
-                    mask_thresh=args.mask_thresh,
-                )
+            boxes, scores, labels, masks = run_frame_fn(frame)
 
             disp = frame.copy()
-
-            # masks first, then boxes/text
             if args.task == "seg" and masks:
                 overlay_masks(disp, masks, labels, alpha=args.mask_alpha)
-
             draw_detections(disp, boxes, scores, labels, class_names)
 
             now = time.time()
