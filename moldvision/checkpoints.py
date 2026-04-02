@@ -63,17 +63,48 @@ def _torch_load(path: str, map_location: Any, *, verbose: bool) -> object:
         return ckpt
 
 
+def _strip_common_prefix(state: dict) -> dict:
+    """Strip a common key prefix (e.g. ``model.``) when *all* keys share it.
+
+    Training wrappers (PyTorch Lightning, custom trainers) sometimes save the
+    outer module's ``state_dict()`` which prefixes every tensor key with the
+    attribute name used to hold the inner model, most commonly ``"model."``.
+    Stripping it lets the state_dict load cleanly into the bare model.
+    """
+    if not state:
+        return state
+    keys = list(state.keys())
+    # Find the longest common prefix that ends at a "." boundary.
+    prefix = keys[0]
+    for k in keys[1:]:
+        while not k.startswith(prefix):
+            # Strip any trailing dot before searching for the next boundary;
+            # without this, rfind(".") finds the trailing dot and the prefix
+            # never shrinks → infinite loop.
+            search_in = prefix[:-1] if prefix.endswith(".") else prefix
+            dot = search_in.rfind(".")
+            if dot < 0:
+                return state  # no common prefix
+            prefix = search_in[: dot + 1]
+        if not prefix:
+            return state
+    # Only strip if prefix ends with "." and is non-trivial (not the whole key).
+    if prefix.endswith(".") and any(k != prefix[:-1] for k in keys):
+        return {k[len(prefix):]: v for k, v in state.items()}
+    return state
+
+
 def _find_state_dict(ckpt: object, checkpoint_key: Optional[str]) -> Optional[dict]:
     if not isinstance(ckpt, dict):
         return None
 
     if checkpoint_key and checkpoint_key in ckpt and isinstance(ckpt[checkpoint_key], dict):
-        return ckpt[checkpoint_key]
+        return _strip_common_prefix(ckpt[checkpoint_key])
 
     for key in ("model_state_dict", "state_dict", "model", "net"):
         val = ckpt.get(key)
         if isinstance(val, dict):
-            return val
+            return _strip_common_prefix(val)
 
     # sometimes the checkpoint dict itself is a state_dict
     try:
@@ -84,6 +115,19 @@ def _find_state_dict(ckpt: object, checkpoint_key: Optional[str]) -> Optional[di
             for k in ckpt.keys()
         ):
             return ckpt  # type: ignore[return-value]
+    except Exception:
+        pass
+
+    # checkpoint dict itself may have a common prefix (e.g. all keys start with "model.")
+    try:
+        stripped = _strip_common_prefix(ckpt)  # type: ignore[arg-type]
+        if stripped is not ckpt and any(
+            str(k).startswith("backbone")
+            or str(k).startswith("transformer")
+            or "class_embed" in str(k)
+            for k in stripped.keys()
+        ):
+            return stripped
     except Exception:
         pass
 

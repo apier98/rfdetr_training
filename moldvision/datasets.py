@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid as _uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from .pathutil import resolve_path
+
+# Matches label-file stems that were exported with a short UUID prefix, e.g.
+# "085b4b9f-component_view_chunk_002_frame_000227".  Group 1 is the base name.
+_LABEL_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{6,16}-(.+)$")
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,27 @@ def _read_yolo_labels_seg(label_path: Path) -> List[Tuple[int, List[float]]]:
     return out
 
 
+def _build_label_path_map(yolo_dir: Path) -> Dict[str, Path]:
+    """Return a mapping from *image stem* to label Path.
+
+    Handles label files that were exported with a short UUID prefix, e.g.
+    ``085b4b9f-component_view_chunk_002_frame_000227.txt``, by stripping the
+    prefix and registering the bare image stem as an alias.  Exact-match entries
+    (no prefix) always take priority.
+    """
+    result: Dict[str, Path] = {}
+    if not yolo_dir.exists():
+        return result
+    for lp in yolo_dir.glob("*.txt"):
+        result[lp.stem] = lp
+        m = _LABEL_PREFIX_RE.match(lp.stem)
+        if m:
+            base = m.group(1)
+            if base not in result:
+                result[base] = lp
+    return result
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
 
@@ -249,16 +275,13 @@ def yolo_to_coco(
     basename_to_path = {p.stem: p for p in imgs}
     image_stems = list(basename_to_path.keys())
 
+    # Build label-path map once; handles UUID-prefixed filenames transparently.
+    label_path_map = _build_label_path_map(yolo_dir)
+
     if labeled_only:
         if not yolo_dir.exists():
             raise RuntimeError(f"labeled_only=True but yolo label dir not found: {yolo_dir}")
-        label_stems = set()
-        for p in yolo_dir.glob("*.txt"):
-            try:
-                if p.stat().st_size > 0:
-                    label_stems.add(p.stem)
-            except Exception:
-                continue
+        label_stems = set(label_path_map.keys())
         image_stems = [s for s in image_stems if s in label_stems]
         if not image_stems:
             raise RuntimeError(f"No labeled images found (no matching non-empty *.txt in {yolo_dir})")
@@ -317,7 +340,7 @@ def yolo_to_coco(
         w, h = image_size(img_path)
         image_entry = {"id": img_id, "file_name": img_path.name, "width": w, "height": h}
 
-        label_path = yolo_dir / f"{stem}.txt"
+        label_path = label_path_map.get(stem, yolo_dir / f"{stem}.txt")
         yolo_objs_seg = _read_yolo_labels_seg(label_path) if task == "seg" else None
         yolo_objs_det = _read_yolo_labels_detect(label_path) if task != "seg" else None
 

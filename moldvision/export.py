@@ -229,6 +229,23 @@ def export_onnx(
         pass
     module.eval()
 
+    # rfdetr 1.6+ has `.export()` methods on the model and its sub-modules that
+    # switch them to optimised `forward_export` code paths.  Without this call
+    # we trace the training-mode forward (which has dynamic control flow and
+    # list-based outputs) — constant folding on that graph is extremely slow.
+    try:
+        inner = module
+        # The real inner model may be nested one level deeper (model.model).
+        for attr in ("model", "module"):
+            candidate = getattr(inner, attr, None)
+            if candidate is not None and hasattr(candidate, "export") and callable(candidate.export):
+                inner = candidate
+                break
+        if hasattr(inner, "export") and callable(inner.export):
+            inner.export()
+    except Exception:
+        pass  # older rfdetr versions don't have this; safe to ignore
+
     want_masks = (task or "").lower().strip() == "seg"
 
     # ONNX exporter currently does not support antialiased upsampling ops like
@@ -396,6 +413,14 @@ def export_onnx(
                 else {0: "batch", 1: "num_queries", 2: "mask_h", 3: "mask_w"}
             )
 
+    # PyTorch 2.6+ added a `dynamo` parameter to torch.onnx.export.  The new
+    # dynamo-based exporter is far slower for large transformer models and may
+    # hang indefinitely.  Force the fast legacy TorchScript path.
+    import inspect as _inspect
+    _extra_onnx_kwargs: dict = {}
+    if "dynamo" in _inspect.signature(torch.onnx.export).parameters:
+        _extra_onnx_kwargs["dynamo"] = False
+
     try:
         def _do_export(opset_version: int) -> None:
             with contextlib.ExitStack() as stack:
@@ -412,6 +437,7 @@ def export_onnx(
                     input_names=input_names,
                     output_names=output_names,
                     dynamic_axes=dynamic_axes,
+                    **_extra_onnx_kwargs,
                 )
 
         _do_export(int(opset))
