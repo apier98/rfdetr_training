@@ -243,6 +243,27 @@ def export_onnx(
                 break
         if hasattr(inner, "export") and callable(inner.export):
             inner.export()
+            # rfdetr's LWDETR.forward_export returns a tuple (outputs_coord, outputs_class[, masks]),
+            # i.e. (boxes, logits[, masks]).  Our ONNX output_names are ["pred_logits", "pred_boxes"],
+            # so we must swap the first two elements before the OnnxWrapper sees them.
+            _exported_module = module
+
+            class _RFDETROutputFixer(nn.Module):
+                """Swap rfdetr forward_export tuple from (coords, logits) to (logits, coords)."""
+
+                def __init__(self, m: nn.Module) -> None:
+                    super().__init__()
+                    self.m = m
+
+                def forward(self, images: torch.Tensor) -> object:  # type: ignore[override]
+                    out = self.m(images)
+                    if isinstance(out, (tuple, list)) and len(out) >= 2:
+                        # Swap: rfdetr returns (coords, logits[, masks])
+                        # We need: (logits, coords[, masks]) to match output_names order.
+                        return (out[1], out[0]) + tuple(out[2:])
+                    return out
+
+            module = _RFDETROutputFixer(_exported_module)
     except Exception:
         pass  # older rfdetr versions don't have this; safe to ignore
 

@@ -285,7 +285,17 @@ def parse_model_output_detr(
     if logits0.ndim != 2 or boxes0.ndim != 2 or boxes0.shape[-1] != 4:
         return [], [], [], None
 
-    # Match RF-DETR's official PostProcess: sigmoid over logits, then select
+    # Detect swapped outputs: older rfdetr ONNX bundles were exported with the
+    # output tuple in (coords, logits) order but named ("pred_logits", "pred_boxes"),
+    # so the tensor named "pred_boxes" actually contains raw class logits and the
+    # tensor named "pred_logits" contains box coordinates.
+    # Discriminator: class logits for non-predicted queries go very negative (< -2),
+    # while reparameterized/sigmoid box coordinates stay in a moderate range (> -2).
+    # Auto-correct when pred_boxes is very negative but pred_logits is moderate.
+    if float(np.min(boxes0)) < -2.0 and float(np.min(logits0)) > -2.0:
+        logits0, boxes0 = boxes0, logits0
+
+
     # the top-K class/query pairs from the flattened [num_queries, num_classes]
     # score grid. This is the decode path used during evaluation.
     probs = _sigmoid_stable(logits0)

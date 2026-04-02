@@ -1,21 +1,34 @@
 # Core dependencies for aria-moldvision
-# Install PyTorch FIRST, separately, to match your CUDA/CPU setup:
-#   https://pytorch.org/get-started/locally/
-# Then install rfdetr:
-#   pip install rfdetr
-# Then install these:
+#
+# ── Step 1: Install PyTorch FIRST, matching your CUDA/CPU setup ───────────────
+# https://pytorch.org/get-started/locally/
+# CUDA 12.4 (tested):
+#   pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+# CPU only:
+#   pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0
+#
+# ── Step 2: Install RF-DETR (after PyTorch) ───────────────────────────────────
+#   pip install rfdetr==1.5.0
+#
+# ── Step 3: Install these ─────────────────────────────────────────────────────
 
-Pillow>=9.0
-numpy>=1.24
-opencv-python>=4.8
-onnxruntime-gpu>=1.16
+# moldvision direct deps — pinned to tested versions
+Pillow==12.1.1
+numpy==2.2.6
+opencv-python==4.13.0.92
+onnxruntime-gpu==1.20.1
+onnx==1.17.0
 
-# Optional: quantization support
-# onnx>=1.14
+# rfdetr transitive deps pinned for stability
+albumentations==1.4.24
+albucore==0.0.23
+supervision==0.27.0.post2
+pycocotools==2.0.11
+faster-coco-eval==1.7.2
 
-# Optional: TensorRT inference (NVIDIA GPU only, install manually)
+# ── Optional: TensorRT inference (NVIDIA GPU only, install manually) ──────────
 # tensorrt
 # pycuda
 
-# Optional: Label Studio pre-labeling backend
+# ── Optional: Label Studio pre-labeling backend ───────────────────────────────
 # pip install "aria-moldvision[label-studio]"
