@@ -100,6 +100,7 @@ except ImportError:
             raise RuntimeError("label-studio-ml package not installed.")
 
 from .jsonutil import load_json
+from . import postprocess as _pp
 
 # Environment variable used to pass the bundle directory to the backend process.
 BUNDLE_DIR_ENV = "MOLDVISION_BUNDLE_DIR"
@@ -117,7 +118,6 @@ class _OnnxBundleRunner:
             raise RuntimeError("numpy, onnxruntime, and Pillow are required. Run: pip install numpy onnxruntime Pillow")
 
         self.bundle_dir = bundle_dir
-        self.preprocess_cfg: dict[str, Any] = load_json(bundle_dir / "preprocess.json")
         self.postprocess_cfg: dict[str, Any] = load_json(bundle_dir / "postprocess.json")
 
         # Load class names — prefer manifest.json inline map, fall back to classes.json list.
@@ -151,51 +151,14 @@ class _OnnxBundleRunner:
         input_meta = self.session.get_inputs()[0]
         _, _, self.target_h, self.target_w = input_meta.shape
 
-        pre = self.preprocess_cfg
-        self.mean = np.array(pre.get("normalize", {}).get("mean", [0.485, 0.456, 0.406]), dtype=np.float32)
-        self.std = np.array(pre.get("normalize", {}).get("std", [0.229, 0.224, 0.225]), dtype=np.float32)
-
         post = self.postprocess_cfg
         self.score_threshold = float(post.get("score_threshold_default", 0.5))
         self.topk = int(post.get("topk_default", 100))
         self.nms_iou = float(post.get("nms_iou_threshold_default", 0.3))
 
     # ------------------------------------------------------------------
-    # Pre / postprocess
+    # Helpers
     # ------------------------------------------------------------------
-
-    def _preprocess(self, pil_image: "Image.Image") -> tuple[np.ndarray, dict]:
-        """Letterbox resize + ImageNet normalise → NCHW float32 tensor."""
-        w, h = pil_image.width, pil_image.height
-        tw, th = self.target_w, self.target_h
-        scale = min(tw / w, th / h)
-        new_w = max(1, int(round(w * scale)))
-        new_h = max(1, int(round(h * scale)))
-        pad_left = (tw - new_w) // 2
-        pad_top = (th - new_h) // 2
-
-        canvas = Image.new("RGB", (tw, th), (114, 114, 114))
-        canvas.paste(pil_image.resize((new_w, new_h), Image.BILINEAR), (pad_left, pad_top))
-
-        arr = np.array(canvas, dtype=np.float32) / 255.0
-        arr = (arr - self.mean) / self.std
-        tensor = arr.transpose(2, 0, 1)[None].astype(np.float32)
-
-        meta = {
-            "scale": scale, "pad_left": pad_left, "pad_top": pad_top,
-            "orig_w": w, "orig_h": h,
-        }
-        return tensor, meta
-
-    def _unletterbox_xyxy(self, x1: float, y1: float, x2: float, y2: float, meta: dict) -> tuple[float, float, float, float]:
-        scale = meta["scale"]
-        pl, pt = meta["pad_left"], meta["pad_top"]
-        ow, oh = meta["orig_w"], meta["orig_h"]
-        x1 = max(0.0, min((x1 - pl) / scale, float(ow)))
-        y1 = max(0.0, min((y1 - pt) / scale, float(oh)))
-        x2 = max(0.0, min((x2 - pl) / scale, float(ow)))
-        y2 = max(0.0, min((y2 - pt) / scale, float(oh)))
-        return x1, y1, x2, y2
 
     def _nms(self, detections: list[dict]) -> list[dict]:
         order = list(range(len(detections)))
@@ -218,18 +181,15 @@ class _OnnxBundleRunner:
         return kept
 
     def _mask_to_polygon_pct(self, mask_hw: np.ndarray, orig_w: int, orig_h: int) -> Optional[list[list[float]]]:
-        """Convert a binary HxW mask to a list of [x_pct, y_pct] polygon points."""
+        """Convert a binary HxW mask (already at original image size) to [x_pct, y_pct] polygon points."""
         if not _CV2_OK:
             return None
         mask_u8 = (mask_hw > 0.5).astype(np.uint8)
         if mask_u8.sum() == 0:
             return None
-        # Resize mask to original image dimensions before finding contours.
-        mask_resized = cv2.resize(mask_u8, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-        contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
-        # Keep only the largest contour.
         contour = max(contours, key=cv2.contourArea)
         if cv2.contourArea(contour) < 4:
             return None
@@ -248,55 +208,42 @@ class _OnnxBundleRunner:
                 "mask_polygon": [[x_pct, y_pct], ...] or None,
             }
         """
-        tensor, meta = self._preprocess(pil_image)
+        canvas, lb = _pp.letterbox_pil(pil_image, target_w=self.target_w, target_h=self.target_h)
+        arr = np.array(canvas, dtype=np.float32) / 255.0
+        tensor = _pp.normalize_image_nchw(arr.transpose(2, 0, 1)[None])
+
         input_name = self.session.get_inputs()[0].name
-        outputs = self.session.run(None, {input_name: tensor})
-        output_map = {self.session.get_outputs()[i].name: outputs[i] for i in range(len(outputs))}
+        raw_outputs = self.session.run(None, {input_name: tensor})
+        output_map = {self.session.get_outputs()[i].name: raw_outputs[i] for i in range(len(raw_outputs))}
 
-        pred_logits: Optional[np.ndarray] = output_map.get("pred_logits")
-        pred_boxes: Optional[np.ndarray] = output_map.get("pred_boxes")
-        pred_masks: Optional[np.ndarray] = output_map.get("pred_masks")
+        want_masks = any(k in output_map for k in ("pred_masks", "masks", "mask"))
+        boxes_px, scores, labels, masks = _pp.parse_model_output_detr(
+            output_map,
+            model_w=self.target_w,
+            model_h=self.target_h,
+            score_thresh=self.score_threshold,
+            topk=self.topk,
+            want_masks=want_masks,
+            mask_thresh=0.5,
+        )
 
-        if pred_logits is None or pred_boxes is None:
-            _log.warning("Model output missing pred_logits or pred_boxes. Got: %s", list(output_map.keys()))
-            return []
+        boxes_px, scores, labels, masks = _pp.filter_known_class_detections(
+            boxes=boxes_px, scores=scores, labels=labels,
+            class_names=self.class_names, masks=masks,
+        )
 
-        logits = pred_logits[0]   # (num_queries, num_classes)
-        boxes = pred_boxes[0]     # (num_queries, 4) cxcywh normalised to model input
-        num_classes = logits.shape[-1]
-        orig_w, orig_h = meta["orig_w"], meta["orig_h"]
-
-        probs = 1.0 / (1.0 + np.exp(-logits))  # sigmoid
-        flat = probs.reshape(-1)
-        k = min(self.topk, flat.size)
-        top_idx = np.argpartition(flat, -k)[-k:]
-        top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
-
+        orig_w, orig_h = pil_image.width, pil_image.height
         detections: list[dict] = []
-        for idx in top_idx:
-            score = float(flat[idx])
-            if score < self.score_threshold:
-                break
-            class_id = int(idx % num_classes)
-            query_idx = int(idx // num_classes)
-            cx, cy, bw, bh = (float(v) for v in boxes[query_idx])
-            # cxcywh normalised → xyxy in model-space pixels
-            cx_px = cx * self.target_w
-            cy_px = cy * self.target_h
-            bw_px = bw * self.target_w
-            bh_px = bh * self.target_h
-            x1, y1, x2, y2 = self._unletterbox_xyxy(
-                cx_px - bw_px / 2, cy_px - bh_px / 2,
-                cx_px + bw_px / 2, cy_px + bh_px / 2,
-                meta,
-            )
+        for i, (box, score, label_id) in enumerate(zip(boxes_px, scores, labels)):
+            x1, y1, x2, y2 = _pp.unletterbox_xyxy(box, lb=lb, orig_w=orig_w, orig_h=orig_h)
 
             mask_polygon: Optional[list[list[float]]] = None
-            if pred_masks is not None:
-                mask_hw = pred_masks[0, query_idx]  # (H, W)
-                mask_polygon = self._mask_to_polygon_pct(mask_hw, orig_w, orig_h)
+            if masks is not None and i < len(masks):
+                mask_bin = _pp.unletterbox_mask(masks[i], lb=lb, orig_w=orig_w, orig_h=orig_h)
+                if mask_bin is not None:
+                    mask_polygon = self._mask_to_polygon_pct(np.asarray(mask_bin), orig_w, orig_h)
 
-            label = self.class_names[class_id] if class_id < len(self.class_names) else str(class_id)
+            label = self.class_names[label_id] if label_id < len(self.class_names) else str(label_id)
             detections.append({
                 "label": label,
                 "score": score,

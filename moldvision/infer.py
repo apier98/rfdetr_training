@@ -13,6 +13,8 @@ from .postprocess import (
     load_bundle_config,
     normalize_image_nchw,
     parse_model_output_generic,
+    resize_mask_to_image,
+    resize_xyxy,
     unletterbox_mask,
     unletterbox_xyxy,
 )
@@ -278,6 +280,10 @@ def _run_tensorrt_inference(
         boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
         if want_masks and masks is not None:
             masks = [unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=float(mt)) for m in masks]
+    elif policy == "square_resize" and (target_w != orig_w or target_h != orig_h):
+        boxes = [resize_xyxy(b, src_w=int(target_w), src_h=int(target_h), dst_w=orig_w, dst_h=orig_h) for b in boxes]
+        if want_masks and masks is not None:
+            masks = [resize_mask_to_image(m, dst_w=orig_w, dst_h=orig_h, mask_thresh=float(mt)) for m in masks]
 
     payload = detections_to_json(
         boxes=boxes,
@@ -397,6 +403,10 @@ def _run_onnx_inference(
                 mm = unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=float(mt))
                 mapped_masks.append(mm)
             masks = mapped_masks
+    elif policy == "square_resize" and (target_w != orig_w or target_h != orig_h):
+        boxes = [resize_xyxy(b, src_w=int(target_w), src_h=int(target_h), dst_w=orig_w, dst_h=orig_h) for b in boxes]
+        if want_masks and masks is not None:
+            masks = [resize_mask_to_image(m, dst_w=orig_w, dst_h=orig_h, mask_thresh=float(mt)) for m in masks]
 
     payload = detections_to_json(
         boxes=boxes,
@@ -574,6 +584,10 @@ def _run_pytorch_inference(
                     mm = unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=float(mt))
                     mapped_masks.append(mm)
                 masks = mapped_masks
+        elif policy == "square_resize" and (target_w != orig_w or target_h != orig_h):
+            boxes = [resize_xyxy(b, src_w=int(target_w), src_h=int(target_h), dst_w=orig_w, dst_h=orig_h) for b in boxes]
+            if want_masks and masks is not None:
+                masks = [resize_mask_to_image(m, dst_w=orig_w, dst_h=orig_h, mask_thresh=float(mt)) for m in masks]
 
     payload = detections_to_json(
         boxes=boxes,
@@ -898,6 +912,7 @@ class InferenceEngine:
 
     def _postprocess(self, out, target_w, target_h, lb, orig_w, orig_h, image_id, backend_name) -> InferResult:
         want_masks = self.task == "seg"
+        policy = str(self.pre_cfg.get("resize_policy") or "square_resize").strip().lower()
         boxes, scores, labels, masks = parse_model_output_generic(
             out,
             img_w=int(target_w),
@@ -912,6 +927,10 @@ class InferenceEngine:
             boxes = [unletterbox_xyxy(b, lb=lb, orig_w=orig_w, orig_h=orig_h) for b in boxes]
             if want_masks and masks is not None:
                 masks = [unletterbox_mask(m, lb=lb, orig_w=orig_w, orig_h=orig_h, mask_thresh=self.mask_thresh) for m in masks]
+        elif policy == "square_resize" and (target_w != orig_w or target_h != orig_h):
+            boxes = [resize_xyxy(b, src_w=int(target_w), src_h=int(target_h), dst_w=orig_w, dst_h=orig_h) for b in boxes]
+            if want_masks and masks is not None:
+                masks = [resize_mask_to_image(m, dst_w=orig_w, dst_h=orig_h, mask_thresh=self.mask_thresh) for m in masks]
 
         boxes, scores, labels, masks = filter_known_class_detections(
             boxes=boxes,

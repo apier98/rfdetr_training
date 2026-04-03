@@ -31,6 +31,7 @@ from infer_helpers import (
     read_checkpoint_args,
 )
 from infer_webcam import run_inference, load_onnx_session, onnx_input_hw, run_onnx_frame
+from moldvision.infer import InferenceEngine
 
 
 def _call_predict_best_effort(predict_fn, image: Image.Image, *, threshold: float):
@@ -129,6 +130,7 @@ def draw_mask_contours(frame: np.ndarray, masks: List[np.ndarray], labels: List[
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ARIA_MoldVision: Run inference on a single image and overlay masks")
     p.add_argument("--image", "-i", required=True, help="Path to image file")
+    p.add_argument("--bundle-dir", default=None, help="deployment bundle directory; preferred when available")
     p.add_argument("--weights", "-w", default=None, help="Path to model checkpoint (.pth); required when --backend pytorch")
     p.add_argument("--task", choices=["detect", "seg"], default="seg", help="Task: detect or seg (default: seg)")
     p.add_argument("--size", choices=["nano", "small", "base", "medium"], default="nano", help="Model size for detection (ignored for seg)")
@@ -164,10 +166,84 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _looks_like_bundle_dir(path: Path) -> bool:
+    required = ("model_config.json", "preprocess.json", "postprocess.json", "classes.json")
+    return path.is_dir() and all((path / name).exists() for name in required)
+
+
+def _infer_bundle_dir(args) -> Path | None:
+    if args.bundle_dir:
+        cand = Path(args.bundle_dir)
+        if _looks_like_bundle_dir(cand):
+            return cand
+        raise FileNotFoundError(f"Bundle directory is missing required files: {cand}")
+
+    if args.onnx_model:
+        cand = Path(args.onnx_model).resolve().parent
+        if _looks_like_bundle_dir(cand):
+            return cand
+
+    if args.weights:
+        cand = Path(args.weights).resolve().parent
+        if _looks_like_bundle_dir(cand):
+            return cand
+
+    return None
+
+
 def main():
     args = parse_args()
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     class_names = load_class_names(args.classes_file) if args.classes_file else []
+    bundle_dir = _infer_bundle_dir(args)
+
+    if bundle_dir is not None:
+        engine = InferenceEngine(
+            bundle_dir=bundle_dir,
+            weights_path=(Path(args.weights) if args.weights else None),
+            device=args.device,
+            score_thresh=float(args.threshold),
+            mask_thresh=float(args.mask_thresh),
+            checkpoint_key=args.checkpoint_key,
+            use_checkpoint_model=bool(args.use_checkpoint_model),
+            strict=False,
+            backend=args.backend,
+        )
+        if not class_names:
+            class_names = list(engine.class_names)
+
+        img_p = Path(args.image)
+        if not img_p.exists():
+            raise SystemExit(f"Image not found: {img_p}")
+        frame_bgr = cv2.imread(str(img_p))
+        if frame_bgr is None:
+            raise SystemExit(f"Failed to read image: {img_p}")
+
+        res = engine.infer(frame_bgr)
+        boxes = list(res.boxes or [])
+        scores = list(res.scores or [])
+        labels = list(res.labels or [])
+        masks = list(res.masks or []) if res.masks is not None else None
+
+        disp = frame_bgr.copy()
+        if args.task == "seg" and masks:
+            overlay_masks(disp, masks, labels, alpha=args.mask_alpha)
+        draw_detections(disp, boxes, scores, labels, class_names)
+
+        if args.output:
+            out_p = Path(args.output)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out_p), disp)
+            print(f"Wrote overlay to: {out_p}")
+        else:
+            cv2.imshow("ARIA_MoldVision", disp)
+            print("Press any key in the image window to exit")
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+
+        det_json = detections_to_json(boxes, scores, labels, class_names=class_names, image_id=str(img_p.name), score_thresh=args.threshold)
+        print(json.dumps(det_json, indent=2))
+        return
 
     if args.backend == "onnx":
         if not args.onnx_model:

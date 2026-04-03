@@ -252,11 +252,11 @@ def _write_deployment_bundle(out_dir: Path, dataset_dir: Path, cfg: TrainConfig,
         (out_dir / "model_config.json").write_text(json.dumps(model_config, indent=2), encoding="utf-8")
 
         # Preprocess settings are part of the "portable contract" for deployment.
-        # Default policy is letterbox to preserve aspect ratio (matches typical operator UIs).
+        # Match RF-DETR's native training/inference path: direct square resize.
         target = int(cfg.resolution) if cfg.resolution is not None else 640
         preprocess = {
             "format_version": 1,
-            "resize_policy": "letterbox",
+            "resize_policy": "square_resize",
             "target_h": target,
             "target_w": target,
             "input_color": "RGB",
@@ -267,7 +267,7 @@ def _write_deployment_bundle(out_dir: Path, dataset_dir: Path, cfg: TrainConfig,
                 "mean": [0.485, 0.456, 0.406],
                 "std": [0.229, 0.224, 0.225],
             },
-            "note": "PIL RGB -> float32 0..1 -> ImageNet mean/std normalization; resize uses letterbox to preserve aspect ratio.",
+            "note": "PIL RGB -> float32 0..1 -> ImageNet mean/std normalization; resize uses RF-DETR-style direct square resize.",
         }
         (out_dir / "preprocess.json").write_text(json.dumps(preprocess, indent=2), encoding="utf-8")
 

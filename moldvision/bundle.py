@@ -261,7 +261,7 @@ def create_bundle(
 
     preprocess = {
         "format_version": 1,
-        "resize_policy": "letterbox",
+        "resize_policy": "square_resize",
         "target_h": int(h),
         "target_w": int(w),
         "input_color": "RGB",
@@ -272,7 +272,7 @@ def create_bundle(
             "mean": [0.485, 0.456, 0.406],
             "std": [0.229, 0.224, 0.225],
         },
-        "note": "Input contract: RGB -> float32 0..1 -> ImageNet mean/std normalization -> model forward.",
+        "note": "Input contract: RGB -> float32 0..1 -> ImageNet mean/std normalization -> RF-DETR-style direct square resize -> model forward.",
     }
     save_json(bundle_dir / "preprocess.json", preprocess)
 
@@ -537,7 +537,7 @@ def create_bundle(
         if detected_input_dtype:
             preprocess["input_dtype"] = detected_input_dtype
             preprocess["note"] = (
-                "Input contract: RGB -> float32 0..1 -> ImageNet mean/std normalization -> "
+                "Input contract: RGB -> float32 0..1 -> ImageNet mean/std normalization -> RF-DETR-style direct square resize -> "
                 f"cast to {detected_input_dtype} for the selected runtime artifact."
             )
             save_json(bundle_dir / "preprocess.json", preprocess)

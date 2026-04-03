@@ -30,6 +30,7 @@ from infer_webcam import (
     run_onnx_frame,
 )
 from moldvision.checkpoints import load_checkpoint_weights
+from moldvision.infer import InferenceEngine
 from moldvision.postprocess import letterbox_pil, parse_model_output_generic, unletterbox_mask, unletterbox_xyxy
 from moldvision.torch_compat import unwrap_torch_module
 import torchvision.transforms as T
@@ -40,6 +41,7 @@ import numpy as np
 def parse_args():
     p = argparse.ArgumentParser(description="ARIA_MoldVision: Run inference on a video file")
     p.add_argument("--video", "-i", required=True, help="input video path")
+    p.add_argument("--bundle-dir", default=None, help="deployment bundle directory; preferred when available")
     p.add_argument("--weights", "-w", default=None, help="path to model weights (.pth); required when --backend pytorch")
     p.add_argument("--task", choices=["detect", "seg"], default="detect", help="inference task")
     p.add_argument(
@@ -76,6 +78,31 @@ def parse_args():
     p.add_argument("--onnx-model", type=str, default=None,
                    help="path to ONNX model file (required when --backend onnx)")
     return p.parse_args()
+
+
+def _looks_like_bundle_dir(path: Path) -> bool:
+    required = ("model_config.json", "preprocess.json", "postprocess.json", "classes.json")
+    return path.is_dir() and all((path / name).exists() for name in required)
+
+
+def _infer_bundle_dir(args) -> Path | None:
+    if args.bundle_dir:
+        cand = Path(args.bundle_dir)
+        if _looks_like_bundle_dir(cand):
+            return cand
+        raise FileNotFoundError(f"Bundle directory is missing required files: {cand}")
+
+    if args.onnx_model:
+        cand = Path(args.onnx_model).resolve().parent
+        if _looks_like_bundle_dir(cand):
+            return cand
+
+    if args.weights:
+        cand = Path(args.weights).resolve().parent
+        if _looks_like_bundle_dir(cand):
+            return cand
+
+    return None
 
 
 def resolve_output_path(args) -> Path | None:
@@ -161,8 +188,34 @@ def main():
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
     class_names = load_class_names(args.classes_file) if args.classes_file else []
+    bundle_dir = _infer_bundle_dir(args)
+    engine = None
 
-    if args.backend == "onnx":
+    if bundle_dir is not None:
+        if args.verbose:
+            print(f"Using bundle runtime from: {bundle_dir}")
+        engine = InferenceEngine(
+            bundle_dir=bundle_dir,
+            weights_path=(Path(args.weights) if args.weights else None),
+            device=args.device,
+            score_thresh=float(args.threshold),
+            mask_thresh=float(args.mask_thresh),
+            checkpoint_key=args.checkpoint_key,
+            use_checkpoint_model=bool(args.use_checkpoint_model),
+            strict=False,
+            backend=args.backend,
+        )
+        if not class_names:
+            class_names = list(engine.class_names)
+
+    if engine is not None:
+        session = None
+        model = None
+        module_for_torch = None
+        infer_resolution = None
+        onnx_target_h = None
+        onnx_target_w = None
+    elif args.backend == "onnx":
         if not args.onnx_model:
             print("Error: --onnx-model is required when --backend onnx")
             return
@@ -262,7 +315,13 @@ def main():
 
             h, w = frame.shape[:2]
 
-            if args.backend == "onnx":
+            if engine is not None:
+                res = engine.infer(frame)
+                boxes = list(res.boxes or [])
+                scores = list(res.scores or [])
+                labels = list(res.labels or [])
+                masks = list(res.masks or []) if res.masks is not None else None
+            elif args.backend == "onnx":
                 boxes, scores, labels, masks = run_onnx_frame(
                     session, frame, onnx_target_h, onnx_target_w,
                     args.threshold, args.task == "seg", args.mask_thresh,

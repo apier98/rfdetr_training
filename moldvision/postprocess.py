@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from .pathutil import resolve_path
-from .jsonutil import load_json
+import json
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -35,7 +35,10 @@ def load_bundle_config(bundle_dir: Path) -> Dict[str, Any]:
     for name in ("model_config.json", "preprocess.json", "postprocess.json", "classes.json"):
         p = bundle_dir / name
         if p.exists():
-            out[name] = load_json(p)
+            try:
+                out[name] = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
     return out
 
 
@@ -227,6 +230,72 @@ def unletterbox_mask(
         im = Image.fromarray(cropped.astype("uint8") * 255)
         im = im.resize((int(orig_w), int(orig_h)), resample=Image.NEAREST)
         return (np.asarray(im) > 127)
+
+
+def resize_xyxy(
+    box_xyxy: List[float],
+    *,
+    src_w: int,
+    src_h: int,
+    dst_w: int,
+    dst_h: int,
+) -> List[float]:
+    x1, y1, x2, y2 = [float(v) for v in box_xyxy]
+    if src_w <= 0 or src_h <= 0:
+        return [x1, y1, x2, y2]
+    sx = float(dst_w) / float(src_w)
+    sy = float(dst_h) / float(src_h)
+    return [x1 * sx, y1 * sy, x2 * sx, y2 * sy]
+
+
+def resize_mask_to_image(
+    mask_hw: Any,
+    *,
+    dst_w: int,
+    dst_h: int,
+    mask_thresh: float = 0.5,
+) -> Optional[Any]:
+    try:
+        import numpy as np
+    except Exception:
+        return None
+
+    m = mask_hw
+    try:
+        if hasattr(m, "detach"):
+            m = m.detach().cpu().numpy()
+        else:
+            m = np.asarray(m)
+    except Exception:
+        return None
+
+    if m.ndim != 2:
+        return None
+
+    is_float_mask = np.issubdtype(m.dtype, np.floating)
+    if is_float_mask:
+        m = m.astype(np.float32, copy=False)
+    else:
+        m = m.astype(np.uint8, copy=False)
+
+    try:
+        import cv2  # type: ignore
+
+        interp = cv2.INTER_LINEAR if is_float_mask else cv2.INTER_NEAREST
+        resized = cv2.resize(m, (int(dst_w), int(dst_h)), interpolation=interp)
+        if is_float_mask:
+            return resized >= float(mask_thresh)
+        return resized.astype(bool)
+    except Exception:
+        from PIL import Image  # type: ignore
+
+        if is_float_mask:
+            im = Image.fromarray(m.astype(np.float32), mode="F")
+            im = im.resize((int(dst_w), int(dst_h)), resample=Image.BILINEAR)
+            return np.asarray(im, dtype=np.float32) >= float(mask_thresh)
+        im = Image.fromarray(m.astype("uint8") * 255)
+        im = im.resize((int(dst_w), int(dst_h)), resample=Image.NEAREST)
+        return np.asarray(im) > 127
 
 
 def _tensor_to_numpy(t: Any) -> Any:
