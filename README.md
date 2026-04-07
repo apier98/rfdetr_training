@@ -17,6 +17,7 @@ Integrated system for defect detection models, from dataset preparation to train
 - Pre-label new images with a trained model via Label Studio (active learning loop)
 - Store persistent defaults (dataset root, num-workers, backend, export format)
 - Run `doctor` to check your environment and print common fix hints
+- **Manage a local data lake**: import qual sessions from MoldPilot/MoldTrace, create label batches, pull balanced training datasets with distribution rules, track full image-level lineage
 
 ## Install
 
@@ -40,7 +41,7 @@ Use `moldvision --help` or `python -m moldvision --help` interchangeably.
 
 ## Configuration
 
-MoldVision stores persistent defaults in `%LOCALAPPDATA%\MoldVision\config.json` (Windows) or the appropriate platform config directory.
+MoldVision stores persistent defaults in `%LOCALAPPDATA%\ARIA\MoldVision\config.json` (Windows) or the appropriate platform config directory.
 
 ```powershell
 moldvision config show                          # print all current settings
@@ -177,6 +178,130 @@ Common training options:
 - Start a new run from existing weights: `--finetune-from path\to\checkpoint.pth`
 - Continue an existing run: `--resume path\to\checkpoint.pth`
 - Evaluation only (no training): `--eval-only`
+
+## Data Lake
+
+The data lake is a local-first, structured image store that sits at the centre of the
+ARIA labeling and training workflow. It connects raw frames from **MoldPilot** qual
+sessions (imported via **MoldTrace**), partial annotation in **Label Studio**, and
+training dataset assembly in MoldVision — all in one traceable place.
+
+```
+MoldPilot (records sessions)
+        │
+        ▼ MoldTrace extracts frames
+moldvision lake session import          ← registers raw frames, all unlabeled
+        │
+        ▼
+moldvision lake label-batch create      ← select N frames to annotate (per session / per task)
+        │ Label Studio export
+        ▼
+moldvision lake label-batch commit      ← merge annotations back; patches index to 'labeled'
+        │
+        ▼
+moldvision lake pull                    ← assemble balanced COCO dataset → moldvision train
+        │
+        ▼
+moldvision train / export / bundle      ← MoldPilot .mpk (detect) / MoldTrace .mpk (seg)
+```
+
+### Lake root location
+
+| Platform | Default |
+|---|---|
+| Windows | `%LOCALAPPDATA%\ARIA\DataLake\` |
+| Linux/macOS | `~/.aria/data_lake/` |
+| Override | `ARIA_DATA_LAKE` env var or `--lake-root PATH` on any command |
+
+### Commands
+
+```powershell
+# Initialise a new lake (creates folder skeleton + config)
+moldvision lake init [--root PATH]
+
+# ── Importing frames ──────────────────────────────────────────────────────────
+
+# Register a MoldPilot qual session (called by MoldTrace after frame extraction)
+moldvision lake session import `
+  --session-meta path\to\session.json `
+  --inspection-frames path\to\frames\ `
+  [--monitor-frames   path\to\hmi_frames\] `
+  [--overwrite]
+
+# Import external / pre-existing images (historical data, supplier datasets, etc.)
+moldvision lake import `
+  --images-dir   path\to\images\ `
+  --task         detect|seg `
+  [--coco-json   path\to\annotations.coco.json]   # optional; partial annotation is fine
+  [--session-id  custom_id]
+  [--name "supplier batch A"] [--mold-id X] [--notes "..."]
+
+# ── Session browser ───────────────────────────────────────────────────────────
+
+moldvision lake session list              # all sessions + coverage summary
+moldvision lake session list --mold-id X  # filter by mold
+moldvision lake session list --task seg   # only sessions with monitor frames
+
+# ── Annotation workflow ───────────────────────────────────────────────────────
+
+# Create a label batch (selects frames, copies them, prints Label Studio instructions)
+moldvision lake label-batch create `
+  --task    detect `
+  --n       200 `
+  --mode    temporal|random `
+  [--sessions id1 id2 ...] `
+  [--min-frame-gap 5] `
+  [--seed 42]
+
+# After annotating in Label Studio and exporting COCO JSON:
+moldvision lake label-batch commit `
+  --batch-id <batch_id> `
+  --coco-json path\to\export\_annotations.coco.json
+
+# List all batches and their status
+moldvision lake label-batch status
+
+# ── Dataset assembly ──────────────────────────────────────────────────────────
+
+# Dry-run: see what would be pulled without writing anything
+moldvision lake pull --task detect --dry-run
+
+# Pull a balanced training dataset
+moldvision lake pull `
+  --task           detect `
+  --train-ratio    0.8 `
+  --max-per-session 300 `    # cap any single session at 300 images
+  --balance-classes `         # undersample over-represented classes
+  [--sessions id1 id2 ...] `  # restrict to specific sessions
+  [--include-pools]           # add hard-negative and background pools
+  [--out-dir datasets\]
+
+# ── Index maintenance ─────────────────────────────────────────────────────────
+
+moldvision lake index          # rebuild image_index.jsonl from disk
+moldvision lake index --stats  # show per-session and per-task coverage table
+
+# ── Model registry ────────────────────────────────────────────────────────────
+
+moldvision lake models install  --task detect --bundle path\to\model.mpk
+moldvision lake models list     --task detect
+moldvision lake models promote  --task detect --bundle-id <id> --channel stable
+
+# ── Pool management ───────────────────────────────────────────────────────────
+
+# Add images to the hard-negative pool (e.g. false positives from a deployed model)
+moldvision lake pools add-hard-negative `
+  --image sessions/<id>/inspection_frames/frame.jpg `
+  --reason "model_false_positive"
+
+# Add background images (negative examples, no defects)
+moldvision lake pools add-background --image sessions/<id>/inspection_frames/bg.jpg
+```
+
+> See `docs/DATA_LAKE_DESIGN.md` for the full architecture, traceability schema,
+> folder layout, and remote storage roadmap.
+
+---
 
 ## Troubleshooting
 
@@ -331,10 +456,12 @@ See `docs/TOOLS.md` for notes and recommendations.
 
 | File | Contents |
 |---|---|
+| `docs/DATA_LAKE_DESIGN.md` | Data lake architecture, folder layout, traceability schema, remote storage roadmap |
 | `docs/TOOLS.md` | Notes on optional scripts and inference utilities |
 | `docs/TRANSFER_AND_INFERENCE.md` | Model transfer and inference workflow notes |
 | `docs/BUNDLE_CONTRACT.md` | Bundle format spec, `manifest.json` schema, MoldPilot integration, remote update design |
 | `docs/LABELING_WORKFLOW.md` | Full Label Studio active-learning loop: pre-label → review → export → retrain |
+| `docs/ARIA_System_Integration.md` | Cross-system integration overview (MoldPilot, MoldTrace, MoldVision) |
 
 ## Dependencies
 

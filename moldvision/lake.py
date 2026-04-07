@@ -376,8 +376,155 @@ def session_import(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Index rebuild (recovery / first-time scan)
+# External data import  (pre-labeled or unlabeled data from outside MoldPilot)
 # ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ExternalImportResult:
+    session_id: str
+    images_added: int
+    images_labeled: int
+    images_unlabeled: int
+    already_existed: bool
+
+
+def external_import(
+    cfg: LakeConfig,
+    *,
+    images_dir: Path,
+    task: str,
+    coco_json: Optional[Path] = None,
+    session_id: Optional[str] = None,
+    name: Optional[str] = None,
+    machine_id: Optional[str] = None,
+    mold_id: Optional[str] = None,
+    part_id: Optional[str] = None,
+    notes: Optional[str] = None,
+    overwrite: bool = False,
+) -> ExternalImportResult:
+    """Import externally-sourced images (and optional pre-existing annotations)
+    into the data lake as a synthetic session.
+
+    The imported data becomes a fully first-class session: it participates in
+    ``lake pull``, ``--max-per-session`` distribution rules, and the full
+    traceability chain identically to data that came from MoldPilot.
+
+    Parameters
+    ----------
+    images_dir:
+        Directory of JPEG/PNG images to import.
+    task:
+        ``"detect"`` (inspection frames) or ``"seg"`` (monitor frames).
+    coco_json:
+        Optional COCO annotation file.  Only images that appear in this file
+        will be marked ``labeled``; images without annotations remain
+        ``unlabeled`` (partial annotation is expected and supported).
+    session_id:
+        Custom session ID.  Defaults to ``external_<timestamp>_<short_uuid>``.
+    name, machine_id, mold_id, part_id, notes:
+        Metadata written into ``session_meta.json``.
+    overwrite:
+        Replace an existing session with the same ID.
+    """
+    import uuid as _uuid
+
+    # Generate a session ID that is clearly external-origin
+    if not session_id:
+        short = _uuid.uuid4().hex[:8]
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        session_id = f"external_{ts}_{short}"
+
+    storage = cfg.storage()
+    frame_type = "inspection" if task == "detect" else "monitor"
+    subdir = "inspection_frames" if frame_type == "inspection" else "monitor_frames"
+    session_rel = f"sessions/{session_id}"
+    meta_rel = f"{session_rel}/session_meta.json"
+
+    already_existed = storage.exists(meta_rel)
+    if already_existed and not overwrite:
+        raise FileExistsError(
+            f"Session '{session_id}' already exists. Use --overwrite to replace."
+        )
+
+    # Build and write session_meta.json
+    manifest: Dict[str, Any] = {
+        "session_id":    session_id,
+        "source":        "external",
+        "name":          name or session_id,
+        "machine_id":    machine_id or "",
+        "mold_id":       mold_id or "",
+        "part_id":       part_id or "",
+        "operator_name": "",
+        "batch_number":  "",
+        "started_at":    datetime.utcnow().isoformat() + "Z",
+        "ended_at":      "",
+        "status":        "completed",
+        "markers":       [],
+        "video_chunks":  [],
+        "notes":         notes or "",
+    }
+    storage.write_text(meta_rel, json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    # Parse COCO to build a set of annotated file names
+    annotated_fnames: set = set()
+    if coco_json and coco_json.exists():
+        try:
+            coco_data = json.loads(coco_json.read_text(encoding="utf-8"))
+            # Images that have at least one annotation
+            ann_img_ids = {a.get("image_id") for a in coco_data.get("annotations", [])}
+            for im in coco_data.get("images", []):
+                if im.get("id") in ann_img_ids:
+                    annotated_fnames.add(Path(im.get("file_name", "")).name)
+        except Exception as e:
+            raise ValueError(f"Could not parse COCO JSON at {coco_json}: {e}") from e
+
+    # Copy images
+    existing_paths = {r["rel_path"] for r in load_index(cfg.root)}
+    new_records: List[Dict[str, Any]] = []
+    meta_fields = _meta_from_manifest(manifest)
+
+    frames = sorted(
+        p for p in images_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    )
+    images_labeled = images_unlabeled = 0
+
+    ann_task_dir = "detect" if task == "detect" else "seg"
+
+    for idx, frame_path in enumerate(frames):
+        rel = f"{session_rel}/{subdir}/{frame_path.name}"
+        if rel not in existing_paths or overwrite:
+            storage.copy_in(frame_path, rel, overwrite=overwrite)
+
+        if rel not in existing_paths:
+            rec = _make_index_record(rel, meta_fields, frame_type, idx)
+            # If this image has annotations, mark it labeled immediately
+            is_labeled = bool(annotated_fnames) and frame_path.name in annotated_fnames
+            if is_labeled:
+                status_field = "detect_status" if task == "detect" else "seg_status"
+                rec[status_field] = LABEL_STATUS_LABELED
+                images_labeled += 1
+            else:
+                images_unlabeled += 1
+            new_records.append(rec)
+
+    append_index_records(cfg.root, new_records)
+
+    # Write COCO annotations into the session annotation folder
+    if coco_json and coco_json.exists():
+        ann_rel = f"{session_rel}/annotations/{ann_task_dir}/_annotations.coco.json"
+        storage.makedirs(f"{session_rel}/annotations/{ann_task_dir}")
+        storage.write_text(ann_rel, coco_json.read_text(encoding="utf-8"))
+
+    return ExternalImportResult(
+        session_id=session_id,
+        images_added=len(new_records),
+        images_labeled=images_labeled,
+        images_unlabeled=images_unlabeled,
+        already_existed=already_existed,
+    )
+
+
 
 def index_rebuild(cfg: LakeConfig) -> int:
     """Full scan of all sessions — rewrites ``image_index.jsonl`` from scratch.

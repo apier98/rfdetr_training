@@ -1040,6 +1040,9 @@ def handle_lake(args) -> int:
     if lake_cmd == "init":
         return _handle_lake_init(args)
 
+    if lake_cmd == "import":
+        return _handle_lake_external_import(args)
+
     if lake_cmd == "session":
         sub = getattr(args, "lake_session_cmd", None)
         if sub == "import":
@@ -1085,6 +1088,41 @@ def handle_lake(args) -> int:
 
 def _handle_lake_init(args) -> int:
     from .lake import init_lake
+
+
+def _handle_lake_external_import(args) -> int:
+    from .lake import external_import
+    cfg = _lake_cfg(args)
+    coco_path = Path(args.coco_json) if args.coco_json else None
+    try:
+        result = external_import(
+            cfg,
+            images_dir=Path(args.images_dir),
+            task=args.task,
+            coco_json=coco_path,
+            session_id=getattr(args, "session_id", None),
+            name=getattr(args, "name", None),
+            machine_id=getattr(args, "machine_id", None),
+            mold_id=getattr(args, "mold_id", None),
+            part_id=getattr(args, "part_id", None),
+            notes=getattr(args, "notes", None),
+            overwrite=bool(args.overwrite),
+        )
+        verb = "Updated" if result.already_existed else "Imported"
+        print(f"{verb} external session: {result.session_id}")
+        print(f"  Images added:    {result.images_added}")
+        print(f"  Labeled:         {result.images_labeled}")
+        print(f"  Unlabeled:       {result.images_unlabeled}")
+        if result.images_unlabeled and not args.coco_json:
+            print(f"  Tip: use 'lake label-batch create --sessions {result.session_id}' to annotate the unlabeled images.")
+        return 0
+    except FileExistsError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
     root_arg = getattr(args, "root", None)
     from .lake import LakeConfig
     root = Path(root_arg) if root_arg else LakeConfig.default_root()

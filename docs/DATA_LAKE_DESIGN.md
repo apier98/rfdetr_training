@@ -394,7 +394,52 @@ Creates the folder skeleton and writes `data_lake_config.json`.
 
 ---
 
-### 8.2 `lake session import`
+### 8.2 `lake import` — external data
+
+Import images from outside the MoldPilot workflow (historical data, supplier datasets,
+public datasets, re-exports from other tools). The imported data becomes a **fully
+first-class session** in the lake: it participates in `lake pull`, `--max-per-session`
+distribution rules, `lake session list`, and the traceability chain identically to data
+that originated from MoldPilot.
+
+```
+moldvision lake import
+  --images-dir  <dir>                 # JPEG/PNG images to import (required)
+  --task        detect|seg            # 'detect' → inspection frames | 'seg' → monitor frames
+
+  # Optional pre-existing annotations
+  [--coco-json  <file>]               # COCO annotation file.
+                                      # Images with annotations → 'labeled'
+                                      # Images without annotations → 'unlabeled'
+                                      # (partial annotation is explicitly supported)
+
+  # Session identity and metadata
+  [--session-id <id>]                 # custom ID; default: 'external_<ts>_<uuid>'
+  [--name       "supplier batch A"]   # human-readable label
+  [--machine-id X]
+  [--mold-id    Y]
+  [--part-id    Z]
+  [--notes      "from supplier XYZ, 2026-Q1"]
+
+  [--overwrite]
+  [--lake-root  PATH]
+```
+
+Actions:
+1. Generates a session ID with prefix `external_` (clearly distinguishable from MoldPilot sessions).
+2. Copies images into `sessions/<id>/inspection_frames/` or `monitor_frames/`.
+3. Writes a synthetic `session_meta.json` with the supplied metadata.
+4. If `--coco-json` is given: writes the annotations into `sessions/<id>/annotations/<task>/` and
+   marks the annotated images as `labeled` immediately. Unannotated images remain `unlabeled`.
+5. Appends records to `image_index.jsonl`.
+
+> **Design rationale**: external data should not have a different code path in `lake pull`
+> — it just looks like a session that happened to arrive pre-labeled.  
+> The `external_` prefix in the session ID is a convention only; it has no special behaviour.
+
+---
+
+### 8.3 `lake session import`
 
 Registers a new qual session and its raw frames. Called after MoldTrace finishes
 `extract_frames` for a session. No annotation happens here — frames are raw material.
@@ -404,8 +449,6 @@ moldvision lake session import
   --session-meta  <path/to/session.json>    # MoldPilot manifest (via MoldTrace meta/)
   --inspection-frames <dir>                 # extracted component-view JPEGs
   [--monitor-frames   <dir>]                # extracted HMI-view JPEGs
-  [--no-quality-filter]                     # include monitor frames that failed
-                                            # MoldTrace monitor_quality check
   [--overwrite]
 ```
 
@@ -416,7 +459,7 @@ Actions:
 
 ---
 
-### 8.3 `lake session list`
+### 8.4 `lake session list`
 
 ```
 moldvision lake session list
@@ -440,7 +483,7 @@ qual_20260401T143000Z_f8e9d3c1        mach_01  mold_a12    540     540    —   
 
 ---
 
-### 8.4 Labeling Loop: `lake label-batch create` / `commit`
+### 8.5 Labeling Loop: `lake label-batch create` / `commit`
 
 Partial labeling is expected. A session may have 1 000 frames but only 80 will be sent to
 Label Studio. The batch commands make that selection explicit and auditable.
@@ -529,7 +572,7 @@ Actions:
 
 ---
 
-### 8.5 `lake pull` — build training dataset
+### 8.6 `lake pull` — build training dataset
 
 Assembles a training-ready `datasets/<UUID>/` from labeled images across sessions.
 The full set of parameters used is stored in `METADATA.json` for reproducibility.
@@ -617,7 +660,7 @@ Run without --dry-run to create dataset.
 
 ---
 
-### 8.6 `lake index`
+### 8.7 `lake index`
 
 ```
 moldvision lake index --rebuild          # full scan → rewrite image_index.jsonl
@@ -629,7 +672,7 @@ annotation edit, or to repair a corrupted index.
 
 ---
 
-### 8.7 `lake models install / list / promote`
+### 8.8 `lake models install / list / promote`
 
 ```
 moldvision lake models install <bundle.mpk> --task detect|seg

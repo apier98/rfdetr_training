@@ -424,6 +424,27 @@ def build_parser() -> argparse.ArgumentParser:
     lk_init = lk_sub.add_parser("init", help="Initialise a new data lake at the given path")
     lk_init.add_argument("--root", default=None, help="Lake root directory (default: ARIA_DATA_LAKE env or platform default)")
 
+    # lake import  (external pre-labeled or unlabeled data, not from MoldPilot)
+    lk_ext = lk_sub.add_parser(
+        "import",
+        help="Import externally-sourced images (and optional pre-existing annotations) as a synthetic session",
+    )
+    lk_ext.add_argument("--images-dir", required=True, help="Directory of JPEG/PNG images to import")
+    lk_ext.add_argument("--task", choices=["detect", "seg"], required=True,
+                        help="'detect' → inspection frames  |  'seg' → monitor frames")
+    lk_ext.add_argument("--coco-json", default=None,
+                        help="Optional COCO annotation file. Annotated images are marked 'labeled'; "
+                             "remaining images are marked 'unlabeled' (partial annotation is fine).")
+    lk_ext.add_argument("--session-id", default=None,
+                        help="Custom session ID (default: auto-generated 'external_<ts>_<uuid>')")
+    lk_ext.add_argument("--name", default=None, help="Human-readable name for this data source")
+    lk_ext.add_argument("--machine-id", default=None)
+    lk_ext.add_argument("--mold-id", default=None)
+    lk_ext.add_argument("--part-id", default=None)
+    lk_ext.add_argument("--notes", default=None, help="Freeform notes (data origin, supplier, etc.)")
+    lk_ext.add_argument("--overwrite", action="store_true", help="Overwrite if session ID already exists")
+    lk_ext.add_argument("--lake-root", default=None)
+
     # lake session
     lk_sess = lk_sub.add_parser("session", help="Session-level commands (import, list)")
     lk_sess_sub = lk_sess.add_subparsers(dest="lake_session_cmd", required=True)

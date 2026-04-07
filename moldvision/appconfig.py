@@ -28,7 +28,7 @@ ENV_NUM_WORKERS = "MOLDVISION_NUM_WORKERS"
 ENV_BACKEND = "MOLDVISION_BACKEND"
 ENV_EXPORT_FORMAT = "MOLDVISION_EXPORT_FORMAT"
 
-_APP_NAME_WIN = "MoldVision"
+_APP_NAME_WIN = "ARIA\\MoldVision"   # %LOCALAPPDATA%\ARIA\MoldVision  (aligned with other ARIA apps)
 _APP_NAME_UNIX = "moldvision"
 
 # Canonical allowed values — used for validation in CLI
@@ -53,8 +53,23 @@ def config_path() -> Path:
     return config_dir() / "config.json"
 
 
+def _migrate_legacy_config() -> None:
+    """One-time migration: move config from the old %LOCALAPPDATA%\MoldVision\ path
+    to the aligned %LOCALAPPDATA%\ARIA\MoldVision\ path."""
+    if sys.platform != "win32":
+        return
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    old_path = Path(base) / "MoldVision" / "config.json"
+    new_path = config_path()
+    if old_path.exists() and not new_path.exists():
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy2(old_path, new_path)
+
+
 def load_config() -> Dict[str, Any]:
     """Load config from disk.  Returns an empty dict if the file is missing or unreadable."""
+    _migrate_legacy_config()
     p = config_path()
     if not p.exists():
         return {}
