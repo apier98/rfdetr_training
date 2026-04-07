@@ -563,11 +563,15 @@ def build_parser() -> argparse.ArgumentParser:
     lk_phn.add_argument("--image", action="append", default=[], dest="images",
                         help="Relative path to image in the lake (can be repeated)")
     lk_phn.add_argument("--reason", default="", help="Why this is a hard negative (e.g. 'model_false_positive')")
+    lk_phn.add_argument("--task", choices=["detect", "seg"], default=None,
+                        help="Force index status update for this task. Auto-detected from path if omitted.")
     lk_phn.add_argument("--lake-root", default=None)
 
     lk_pbg = lk_pools_sub.add_parser("add-background", help="Add image(s) to the backgrounds pool")
     lk_pbg.add_argument("--image", action="append", default=[], dest="images",
                         help="Relative path to image in the lake (can be repeated)")
+    lk_pbg.add_argument("--task", choices=["detect", "seg"], default=None,
+                        help="Force index status update for this task. Auto-detected from path if omitted.")
     lk_pbg.add_argument("--lake-root", default=None)
 
     return p

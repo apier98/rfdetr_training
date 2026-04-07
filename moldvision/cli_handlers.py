@@ -1376,10 +1376,16 @@ def _handle_lake_pools_add(args, *, pool: str) -> int:
     # Update image_index.jsonl for known images
     all_recs = load_index(cfg.root)
     known_paths = {r["rel_path"] for r in all_recs}
-    to_patch = [img for img in images if img.replace("\\", "/") in known_paths]
+    to_patch = [img.replace("\\", "/") for img in images if img.replace("\\", "/") in known_paths]
+    forced_task = getattr(args, "task", None)
     if to_patch:
-        status_field = "detect_status"
-        patch_index_records(cfg.root, [p.replace("\\", "/") for p in to_patch], {status_field: new_status})
+        for img_norm in to_patch:
+            if forced_task:
+                status_field = "detect_status" if forced_task == "detect" else "seg_status"
+            else:
+                # Infer from path: monitor_frames → seg, inspection_frames or unknown → detect
+                status_field = "seg_status" if "monitor_frames" in img_norm else "detect_status"
+            patch_index_records(cfg.root, [img_norm], {status_field: new_status})
 
     print(f"Added {added} image(s) to {pool} pool.")
     return 0
