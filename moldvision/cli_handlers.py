@@ -621,11 +621,81 @@ def handle_dataset_info(args) -> int:
     return 0
 
 
+def _resolve_finetune_weights(bundle_id: str, args) -> str:
+    """Resolve a bundle_id to a checkpoint path from the lake model registry."""
+    task = getattr(args, "task", "detect")
+    task_dir = "defect_detection" if task == "detect" else "monitor_segmentation"
+
+    # Try to find the lake root from config files
+    lake_root = None
+    for candidate in [
+        Path("data_lake_config.json"),
+        Path.home() / ".aria" / "data_lake_config.json",
+    ]:
+        if candidate.exists():
+            cfg = json.loads(candidate.read_text(encoding="utf-8"))
+            lake_root = Path(cfg.get("root", ""))
+            break
+
+    if lake_root is None:
+        lake_root = Path(getattr(args, "lake_root", "."))
+
+    registry_path = lake_root / "models" / task_dir / "registry.json"
+    if not registry_path.exists():
+        raise FileNotFoundError(
+            f"Lake model registry not found at {registry_path}. "
+            f"Cannot resolve bundle_id '{bundle_id}'."
+        )
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    bundles = registry.get("bundles", [])
+
+    # Handle special "latest" keyword
+    if bundle_id == "latest":
+        active = registry.get("active", {})
+        bundle_id = active.get("stable") or active.get("dev")
+        if not bundle_id:
+            raise ValueError("No active bundle found in registry for 'latest'.")
+
+    # Find the bundle entry
+    match = None
+    for b in bundles:
+        if b.get("bundle_id") == bundle_id:
+            match = b
+            break
+
+    if match is None:
+        raise ValueError(
+            f"Bundle '{bundle_id}' not found in registry at {registry_path}. "
+            f"Available: {[b.get('bundle_id') for b in bundles]}"
+        )
+
+    # Resolve checkpoint path
+    bundle_dir = Path(match.get("path", ""))
+    if not bundle_dir.is_absolute():
+        bundle_dir = lake_root / bundle_dir
+
+    for ckpt_name in ("checkpoint_portable.pth", "checkpoint.pth", "checkpoint_best_total.pth"):
+        ckpt = bundle_dir / ckpt_name
+        if ckpt.exists():
+            print(f"Resolved finetune-from '{match.get('bundle_id')}' → {ckpt}")
+            return str(ckpt)
+
+    raise FileNotFoundError(
+        f"No checkpoint found in bundle directory {bundle_dir}. "
+        f"Looked for: checkpoint_portable.pth, checkpoint.pth, checkpoint_best_total.pth"
+    )
+
+
 def handle_train(args) -> int:
     try:
         aug_cfg = None
         if getattr(args, "aug_config", None):
             aug_cfg = _load_jsonish(str(args.aug_config))
+        # Resolve finetune-from: if not an existing path, treat as bundle_id
+        finetune_weights = getattr(args, "finetune_from", None)
+        if finetune_weights and not Path(finetune_weights).exists():
+            finetune_weights = _resolve_finetune_weights(finetune_weights, args)
         # Resolve num_workers: explicit arg > appconfig default
         num_workers = args.num_workers if args.num_workers is not None else appconfig.get_default_num_workers()
         cfg = TrainConfig(
@@ -651,7 +721,7 @@ def handle_train(args) -> int:
             run_test=bool(args.run_test),
             benchmark=bool(args.benchmark),
             resume=args.resume,
-            finetune_from=args.finetune_from,
+            finetune_from=finetune_weights,
             use_checkpoint_model=bool(args.use_checkpoint_model),
             checkpoint_key=args.checkpoint_key,
             patch_inference_mode=args.patch_inference_mode,

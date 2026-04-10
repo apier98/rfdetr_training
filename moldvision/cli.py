@@ -373,7 +373,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # safer replacements than the old "resume but partially load and then remove resume"
     tr.add_argument("--resume", default=None, help="Resume training (trainer checkpoint)")
-    tr.add_argument("--finetune-from", default=None, help="Load weights (best-effort) then start a new run")
+    tr.add_argument("--finetune-from", default=None,
+        help="Bundle ID (or raw path) to fine-tune from. Resolves checkpoint from lake model registry.")
     tr.add_argument("--use-checkpoint-model", action="store_true", help="If checkpoint contains a pickled model, use it (trusted only)")
     tr.add_argument("--checkpoint-key", default=None, help="Explicit key inside checkpoint that contains state_dict")
 
@@ -616,6 +617,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a dataset summary (feature counts, quality stats, defect distribution)",
     )
 
+    # ---- publish ----
+    sp_publish = sub.add_parser("publish", help="Publish a model bundle to the S3 model catalog")
+    sp_publish.add_argument("bundle_path", type=str, help="Path to bundle directory or .mpk/.zip")
+    sp_publish.add_argument("--role", required=True, help="Model role (e.g., defect_detector, monitor_segmenter)")
+    sp_publish.add_argument("--channel", default="stable", choices=["stable", "beta"], help="Release channel")
+    sp_publish.add_argument("--compatible-layouts", nargs="*", default=None, help="HMI layouts this model supports (default: all)")
+    sp_publish.add_argument("--dry-run", action="store_true", help="Print what would be done without uploading")
+
     return p
 
 
@@ -655,6 +664,9 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.cmd == "predictive":
         return cli_handlers.handle_predictive(args)
+
+    if args.cmd == "publish":
+        return cli_handlers.handle_publish(args)
 
     build_parser().parse_args(["--help"])
     return 2
