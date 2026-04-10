@@ -624,6 +624,64 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a dataset summary (feature counts, quality stats, defect distribution)",
     )
 
+    pred_train = pred_sub.add_parser(
+        "train",
+        help="Train startup-suggestion GBT models from a training_row_v1 JSONL file",
+    )
+    pred_train.add_argument(
+        "--input", "-i", required=True,
+        help="Path to training_rows.jsonl (training_row_v1/v2 format)",
+    )
+    pred_train.add_argument(
+        "--output-dir", "-o", required=True,
+        help="Directory to write trained model artifacts and training_meta.json",
+    )
+    pred_train.add_argument(
+        "--cv-folds", type=int, default=5,
+        help="Number of cross-validation folds (default: 5)",
+    )
+    pred_train.add_argument(
+        "--n-estimators", type=int, default=300,
+        help="Number of LightGBM boosting rounds (default: 300)",
+    )
+    pred_train.add_argument(
+        "--learning-rate", type=float, default=0.05,
+        help="LightGBM learning rate (default: 0.05)",
+    )
+    pred_train.add_argument(
+        "--null-strategy", choices=["mean_impute", "zero_impute"], default="mean_impute",
+        help="Strategy for imputing missing feature values (default: mean_impute)",
+    )
+
+    pred_bundle = pred_sub.add_parser(
+        "bundle",
+        help="Package trained suggestion models into a deployable .sugbundle",
+    )
+    pred_bundle.add_argument(
+        "--train-dir", required=True,
+        help="Directory written by 'predictive train' containing train_result.pkl",
+    )
+    pred_bundle.add_argument(
+        "--model-name", required=True,
+        help="Bundle model name (e.g. 'startup-suggestion')",
+    )
+    pred_bundle.add_argument(
+        "--model-version", required=True,
+        help="Semantic version string (e.g. '1.0.0')",
+    )
+    pred_bundle.add_argument(
+        "--channel", default="stable", choices=["stable", "beta"],
+        help="Release channel (default: stable)",
+    )
+    pred_bundle.add_argument(
+        "--supersedes", default=None,
+        help="bundle_id of the bundle this replaces (optional)",
+    )
+    pred_bundle.add_argument(
+        "--sugbundle", action="store_true",
+        help="Also pack the bundle directory into a .sugbundle zip archive",
+    )
+
     # ---- publish ----
     sp_publish = sub.add_parser("publish", help="Publish a model bundle to the S3 model catalog")
     sp_publish.add_argument("bundle_path", type=str, help="Path to bundle directory or .mpk/.zip")

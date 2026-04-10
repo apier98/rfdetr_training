@@ -1528,6 +1528,10 @@ def handle_predictive(args) -> int:
     subcmd = getattr(args, "predictive_cmd", None)
     if subcmd == "validate-dataset":
         return _handle_predictive_validate_dataset(args)
+    if subcmd == "train":
+        return _handle_predictive_train(args)
+    if subcmd == "bundle":
+        return _handle_predictive_bundle(args)
     print(f"Unknown predictive sub-command: {subcmd}")
     return 2
 
@@ -1597,6 +1601,122 @@ def _handle_predictive_validate_dataset(args) -> int:
                 print(f"  {lay.get('hmi_layout_id', '?')} / {lay.get('machine_family', '?')}")
 
     return 0 if report["valid"] else 3
+
+
+def _handle_predictive_train(args) -> int:
+    """Handle ``predictive train``.
+
+    Trains one LightGBM model per suggestion target (quality score + 4 defect
+    classifiers) and writes ``train_result.pkl`` + ``training_meta.json`` to
+    ``--output-dir``.
+    """
+    import pickle
+
+    from .predictive.training_row_loader import load_training_rows
+    from .predictive.trainer import GbtTrainingConfig, train_suggestion_models
+
+    input_path = resolve_path(args.input)
+    output_dir = resolve_path(args.output_dir)
+
+    if not input_path.exists():
+        print(f"ERROR: File not found: {input_path}")
+        return 2
+
+    print(f"Loading {input_path} ...")
+    try:
+        rows = load_training_rows(input_path)
+    except (ValueError, OSError) as exc:
+        print(f"ERROR: {exc}")
+        return 2
+
+    if not rows:
+        print("ERROR: File contains zero rows.")
+        return 2
+
+    cfg = GbtTrainingConfig(
+        n_estimators=args.n_estimators,
+        learning_rate=args.learning_rate,
+        cv_folds=args.cv_folds,
+        null_strategy=args.null_strategy,
+    )
+
+    print(f"Training on up to {len(rows)} rows  (cv_folds={cfg.cv_folds}, n_estimators={cfg.n_estimators}) ...")
+    try:
+        result = train_suggestion_models(rows, config=cfg)
+    except (ValueError, RuntimeError) as exc:
+        print(f"ERROR: Training failed — {exc}")
+        return 2
+
+    if not result.targets:
+        print("ERROR: No targets could be trained (insufficient eligible rows?).")
+        return 2
+
+    # Print CV metric table.
+    print(f"\nTrained {len(result.targets)} target(s) on {result.n_eligible_rows} eligible rows"
+          f"  ({len(result.feature_keys)} features):\n")
+    col_w = max(len(n) for n in result.targets) + 2
+    print(f"  {'Target':<{col_w}}  Metric       Mean      Std")
+    print("  " + "-" * (col_w + 36))
+    for name, tr in result.targets.items():
+        print(f"  {name:<{col_w}}  {tr.cv_metric_name:<12} {tr.cv_metric_value:7.4f}  ±{tr.cv_metric_std:.4f}")
+
+    # Persist training result.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pkl_path = output_dir / "train_result.pkl"
+    with open(pkl_path, "wb") as fh:
+        pickle.dump(result, fh)
+
+    print(f"\nArtifacts written to: {output_dir}")
+    print(f"  {pkl_path.name}")
+    return 0
+
+
+def _handle_predictive_bundle(args) -> int:
+    """Handle ``predictive bundle``.
+
+    Loads the pickled ``TrainResult`` produced by ``predictive train``, exports
+    all targets to ONNX, writes a ``manifest.json`` + ``training_meta.json``,
+    and optionally packs the directory into a ``.sugbundle`` zip archive.
+    """
+    import pickle
+
+    from .predictive.suggestion_bundle import pack_sugbundle, write_suggestion_bundle
+
+    train_dir = resolve_path(args.train_dir)
+    pkl_path = train_dir / "train_result.pkl"
+
+    if not pkl_path.exists():
+        print(f"ERROR: train_result.pkl not found in {train_dir}")
+        print("       Run 'predictive train' first.")
+        return 2
+
+    print(f"Loading training result from {pkl_path} ...")
+    with open(pkl_path, "rb") as fh:
+        result = pickle.load(fh)
+
+    output_dir = train_dir / "deploy"
+    print(f"Writing bundle to {output_dir} ...")
+    try:
+        bundle_dir = write_suggestion_bundle(
+            output_dir=output_dir,
+            train_result=result,
+            model_name=args.model_name,
+            model_version=args.model_version,
+            channel=args.channel,
+            supersedes=args.supersedes,
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"ERROR: Bundle write failed — {exc}")
+        return 2
+
+    print(f"  Bundle directory: {bundle_dir}")
+
+    if args.sugbundle:
+        archive = pack_sugbundle(bundle_dir)
+        print(f"  Packed archive:   {archive}")
+
+    print("\nDone.")
+    return 0
 
 
 # ── publish ────────────────────────────────────────────────────────────────

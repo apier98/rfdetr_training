@@ -260,6 +260,112 @@ moldvision bundle `
 
 ---
 
+## Startup-Suggestion Bundle (`.sugbundle`)
+
+A separate bundle format for the Startup Assistant's GBT (LightGBM → ONNX)
+models.  These bundles are produced by `moldvision predictive bundle` and
+installed into MoldPilot via `ModelRegistryService.install_suggestion_bundle()`.
+
+### Directory layout
+
+```
+<bundle_dir>/
+├── manifest.json          # metadata + checksums (schema below)
+├── model_quality_score.onnx        # regression model — quality score 0–1
+├── model_defect_burn_mark.onnx     # binary classifier — burn mark probability
+├── model_defect_flash.onnx         # binary classifier — flash probability
+├── model_defect_sink_mark.onnx     # binary classifier — sink mark probability
+├── model_defect_weld_line.onnx     # binary classifier — weld line probability
+└── training_meta.json     # training provenance
+```
+
+Pack with `moldvision predictive bundle --pack` to produce `<name>.sugbundle`
+(a plain ZIP archive of the directory above).
+
+### `manifest.json` schema
+
+| Field | Type | Description |
+|---|---|---|
+| `bundle_type` | `"startup_suggestion"` | Discriminates from CV inference bundles |
+| `bundle_id` | string | `{model-name}-suggest-v{version}` |
+| `model_name` | string | Human-readable label shown in MoldPilot UI |
+| `model_version` | string | Semantic version string |
+| `format_version` | `1` | Schema version (int) |
+| `created_at` | ISO 8601 string | UTC timestamp when bundle was written |
+| `feature_keys` | string[] | Ordered list of MoldTrace feature keys expected at inference |
+| `imputation` | object | Mean imputation values: `{"<feature_key>": <float>, …}` — applied before inference when a feature is missing |
+| `target_models` | object | Map of target name → ONNX filename: `{"quality_score": "model_quality_score.onnx", …}` |
+| `quality_weights` | object | Defect-to-quality weight map used by MoldPilot Tier 1 local search: `{"burn_mark": 0.20, "flash": 0.30, "sink_mark": 0.35, "weld_line": 0.15}` |
+| `checksums` | object | SHA-256 hex per ONNX file and `training_meta.json` |
+
+### `training_meta.json` schema
+
+```json
+{
+  "n_rows": 1240,
+  "cv_metrics": {
+    "quality_score": {"rmse": 0.082},
+    "defect_burn_mark": {"auc": 0.91},
+    "defect_flash": {"auc": 0.88},
+    "defect_sink_mark": {"auc": 0.93},
+    "defect_weld_line": {"auc": 0.85}
+  },
+  "date": "2026-04-10T12:00:00"
+}
+```
+
+### ONNX model conventions
+
+All five ONNX models follow the same contract:
+
+- **Input**: `float_input` — shape `[1, n_features]`, `float32`, NaN-safe
+- **Regression** (`quality_score`) — single output `variable` shape `[1, 1]`
+- **Classification** (`defect_*`) — two outputs:
+  - `label` — predicted class (unused by MoldPilot)
+  - `probabilities` — shape `[1, 2]`; MoldPilot reads `probabilities[0][1]` (positive-class probability)
+- Exported with `onnxmltools.convert_lightgbm(..., zipmap=False)` — no ZipMap post-processing
+
+### Creating a `.sugbundle` (MoldVision)
+
+```powershell
+# 1. Export training rows from ARIA MoldTrace (JSONL, training_row_v1 schema)
+#    Place in e.g. C:\data\training_rows.jsonl
+
+# 2. Train the five GBT models
+moldvision predictive train `
+  --input C:\data\training_rows.jsonl `
+  --output-dir runs\suggest-v1 `
+  --model-name "Mold A Startup Suggestion" `
+  --model-version 1.0.0
+
+# 3. Pack the suggestion bundle
+moldvision predictive bundle `
+  --train-dir runs\suggest-v1 `
+  --output-dir bundles\suggest-v1 `
+  --pack
+# → bundles\suggest-v1\mold-a-startup-suggestion-v1.0.0.sugbundle
+```
+
+### Installing a `.sugbundle` (MoldPilot)
+
+```python
+from pathlib import Path
+from aria_moldpilot.infrastructure.model_registry import LocalModelRegistryService
+
+registry = LocalModelRegistryService(models_dir=Path("models"))
+ref = registry.install_suggestion_bundle(
+    Path("mold-a-startup-suggestion-v1.0.0.sugbundle")
+)
+# MoldPilot app.py auto-loads the active suggestion bundle at startup
+# and upgrades the Startup Assistant from Tier 0 (rule-based) to Tier 1 (GBT).
+```
+
+Suggestion bundles are tracked in `registry_suggestions.json` alongside the
+main `registry.json` and stored under `models/suggestion_bundles/`.
+
+
+---
+
 ## Versioning Convention
 
 Bundle IDs follow the pattern `{model-name}-v{major}.{minor}.{patch}`.

@@ -341,6 +341,66 @@ sessions/<uuid>/
 }
 ```
 
+**Training Row Record (`training_row_v1`)**
+```json
+{
+  "schema_version": "training_row_v1",
+  "component_id": "comp_001",
+  "traceability": {
+    "session_uuid": "qual_20260324T093000Z_a1b2c3d4",
+    "machine_id": "machine_01",
+    "mold_id": "mold_a12",
+    "part_id": "part_cap_32",
+    "operator_notes": "Ambient temp 22°C. New mold insert.",
+    "recording_mode": "qualification"
+  },
+  "eligibility": {
+    "training_ready": true,
+    "coverage_ratio": 0.92,
+    "recording_mode_ok": true,
+    "critical_slots_present": 5,
+    "critical_slots_required": 5
+  },
+  "window": {
+    "start_t": 45.0,
+    "end_t": 48.0,
+    "process_video_id": "hmi_01",
+    "process_video_ids": ["hmi_01"],
+    "inspection_video_id": "inspection_01"
+  },
+  "features": {
+    "temp_barrel:actual.last": 220.5,
+    "temp_barrel:actual.mean": 220.2,
+    "temp_barrel:actual.coverage_ratio": 1.0,
+    "pressure_injection:actual.last": 1200.0
+  },
+  "targets": {
+    "y_defect_sink_mark": 1,
+    "y_burden_sink_mark": 0.18,
+    "y_max_severity_sink_mark": 0.62,
+    "y_top2_severity_sink_mark": 0.95,
+    "y_total_defect_tracks": 2,
+    "y_quality_score": 0.84,
+    "labels_present": ["sink_mark"],
+    "quality_formula": { "type": "weighted_burden_complement_v1", "weights": { "burn_mark": 0.20, "flash": 0.30, "sink_mark": 0.35, "weld_line": 0.15 } }
+  },
+  "context": {
+    "defect_labels_detected": ["Sink_Mark"],
+    "defect_classes_monitored": ["burn_mark", "flash", "sink_mark", "weld_line"],
+    "process_params_mode": "statefull"
+  }
+}
+```
+
+**Feature key rule**: feature keys always use the unscoped `parameter_id_base` (never the
+page-scoped form `page|subpage|parameter_id`). The canonical format is
+`<parameter_id_base>:<slot_id>.<stat>` — e.g. `temp_barrel:actual.mean`.
+This guarantees consistent column names across sessions regardless of which OCR pipeline
+variant (raw / clean / statefull) was used.
+
+`training_row_v1` is the canonical supervised-learning export derived from `final_component_record_v1`.
+It is the artifact intended for downstream suggestion-model training and ONNX-compatible inference pipelines.
+
 ### 4.6 HMI Layout Files
 
 Layouts define the OCR regions of interest for each machine model. They are JSON files stored
@@ -403,6 +463,11 @@ making the cloud swap code-compatible. The swap requires:
 
 Internal toolchain for the ARIA team to **train, validate, and package Computer Vision models**
 that are deployed into MoldPilot (monitoring mode) and MoldTrace (all vision-based pipeline stages).
+
+> **Runtime environment**: MoldVision runs on an **ARIA-side local GPU workstation** (or
+> equivalent internal compute). It is never deployed to customer machines. A single CUDA-capable
+> GPU workstation is sufficient for both CV fine-tuning and tabular model training at the current
+> dataset scale. Cloud compute is not required at this stage.
 
 Key capabilities:
 - UUID-based dataset management with COCO/YOLO ingestion
@@ -573,36 +638,33 @@ MoldPilot and MoldTrace consume it.
   → coupling stage → labeled dataset records
 ```
 
-### 6.2 Flow B — Model Training → Bundle Deployment
-
-The detect model (5 classes: `Component_Base` + 4 defect classes) is the **same bundle**
-deployed to both MoldPilot and MoldTrace. Both consumers need `Component_Base` together
-with the defect classes — MoldPilot anchors severity metrics against it; MoldTrace uses it
-in the `components_from_clips` stage.
+### 6.2 Flow B — Model Training → Bundle Deployment to MoldPilot
 
 ```
-[MoldVision — detect bundle]
-  moldvision dataset create + ingest + train --task detect + export + bundle --mpk
-  → produces mold-defect-v1.0.0.mpk  (5 classes: Component_Base + 4 defect classes)
+[MoldVision]
+  moldvision dataset create + ingest + train + export + bundle --mpk
+  → produces mold-defect-v1.0.0.mpk
 
-[Deploy to MoldPilot]
+[Transfer]
   Copy .mpk to MoldPilot machine (USB / S3 download / shared drive)
+
+[MoldPilot — model registry]
   LocalModelRegistryService.install_bundle("mold-defect-v1.0.0.mpk")
+  → validates manifest + checksums
   → extracts to models/bundles/mold-defect-v1.0.0/
-  → OnnxInferenceService uses Component_Base for IoU tracking + defect classes for severity
+  → updates models/registry.json (active_bundle_id)
 
-[Deploy to MoldTrace — components role]
-  python -m moldtrace models install mold-defect-v1.0.0.mpk --role components
-  python -m moldtrace models activate mold-defect-v1.0.0 --role components
-  → components_from_clips + defects_from_comps stages both use this same bundle
+[MoldPilot — monitoring mode]
+  OnnxInferenceService.load_bundle("mold-defect-v1.0.0")
+  → reads preprocess.json, postprocess.json
+  → loads model_fp16.onnx (CUDA) or model.onnx (CPU)
+  → starts inference on live frames
 ```
 
-### 6.3 Flow C — Seg Model → Bundle Deployment to MoldTrace
-
-The seg model (1 class: `HMI_Screen`) is only needed by MoldTrace.
+### 6.3 Flow C — Model Training → Bundle Deployment to MoldTrace
 
 ```
-[MoldVision — seg bundle]
+[MoldVision]
   moldvision train --task seg   ← for monitor_segmenter role
   moldvision bundle --mpk
 
@@ -612,25 +674,69 @@ The seg model (1 class: `HMI_Screen`) is only needed by MoldTrace.
 
 [MoldTrace — pipeline]
   extract_monitor_stage uses monitor_segmenter bundle
+  components_from_clips uses components bundle
 ```
 
-### 6.4 Flow D — Labeled Dataset → Suggestion Logic (future)
+### 6.4 Flow D — Labeled Dataset → Suggestion Logic
 
 ```
+[MoldPilot — Startup Assistant, Tier 0: domain rules]  ← IMPLEMENTED
+  RuleBasedStartupAssistantService.update_observation(defect_severities)
+  RuleBasedStartupAssistantService.get_suggestion(metric_id, metric_value, threshold)
+  → maps defect types to parameter adjustment directions (domain knowledge)
+  → severity-weighted aggregation across simultaneous defects
+  → conflicting directions cancel proportionally (e.g. Flash↓pressure vs SinkMark↑pressure)
+  → ±10% step constraint per suggestion
+  → always available, zero training data required
+
 [MoldTrace output]
-  labeled JSONL: { component, process_parameters, defects }
-  accumulated across many qualification sessions
+  training_row_v1 JSONL: { features, targets, context, traceability, window }
+  accumulated across qualification sessions in S3 (or local dev folder)
+  validated against schemas/training_row_v1.schema.json (JSON Schema 2020-12)
 
-[Future: Suggestion Model Training]
-  Input features: process_parameters (barrel temp, mold temp, injection pressure,
-                  holding pressure, cooling time, …)
-  Target: surface quality score / defect occurrence probability
+[MoldVision — dataset validation]  ← IMPLEMENTED
+  moldvision predictive validate-dataset --input <training_row_v1 path>
+  → load, validate, filter eligible rows, summarize schema homogeneity
 
-[Future: Startup Assistant in MoldPilot]
-  StartupAssistantService.get_suggestion(current_params) → StartupSuggestion
-  → displayed on Startup Assistant screen as threshold bars +
-    recommended parameter adjustments
+[MoldVision — offline predictive training]
+  moldvision predictive train --dataset <training_row_v1 path>
+  → GBT model: f(θ) → { quality_score, defect_risks_by_class }
+  → exported as startup-suggestion bundle (.bundle artifact)
+
+[Transfer]
+  Copy startup-suggestion bundle to MoldPilot machine alongside the CV .mpk bundle
+
+[MoldPilot — Startup Assistant, Tier 1: offline prior]
+  StartupAssistantService.get_suggestion(current_params)
+  → loads bundle, builds feature vector from current HMI state
+  → runs GBT inference → quality_score + defect_risks
+  → local search over candidate adjustments → ranked MachineParameter suggestions
+  → displayed as threshold bars + recommended parameter adjustments
+
+[MoldPilot — Startup Assistant, Tier 2: online Bayesian adaptation]
+  After each shot during startup (CV model is live in Monitoring Mode):
+  → compute q_shot = 1 − clamp(Σ weight_i × burden_i, 0, 1)  [live defect observations]
+  → observe θ_shot from current HMI parameter state
+  → update GP surrogate posterior on (θ_shot, q_shot)
+  → next suggestion via EI acquisition on the GP
+  → naturally corrects for twin-machine domain shift (machine Y ≠ machine X used in qualification)
+  Session state resets on each new mould startup.
 ```
+
+> **Tier 0 fallback guarantee**: When no trained model is available (first deployment,
+> new mould family), the rule-based engine provides physically meaningful suggestions
+> from day one. As Tier 1/2 become available they override Tier 0, but the rule engine
+> remains the ultimate fallback.
+
+> **Twin-machine note**: Qualification sessions are recorded on machine X. Startup may run on
+> machine Y (a mechanical twin). The offline GBT prior encodes knowledge from machine X. The
+> online GP adaptation layer in MoldPilot corrects for machine Y's systematic residual
+> (pressure/temperature offsets, hydraulic response) using live defect observations from the
+> first few startup shots. No additional data pipeline is needed — the monitoring loop already
+> produces the required `(params, defects)` observations.
+
+> **Online adaptation boundary**: The Tier 2 GP adaptation is an algorithm in MoldPilot, not a
+> trained artefact. It has no bundle format and is not produced or versioned by MoldVision.
 
 ---
 
@@ -661,6 +767,12 @@ The following class IDs are used across all three systems. Any retrained model m
 | 3 | `Flash` | ✅ monitoring | ✅ defect detection |
 | 4 | `Burn_Mark` | ✅ monitoring | ✅ defect detection |
 
+> **Single unified model strategy**: `Component_Base` (ID 0) and all four defect classes (IDs 1–4)
+> are handled by **one RF-DETR model**. MoldPilot Monitoring Mode, MoldPilot Startup Mode, and all
+> vision stages in MoldTrace all consume the same model bundle. The model is retrained in MoldVision
+> as qualification data accumulates and new defect types are encountered, then shipped as an updated
+> `.mpk` bundle. No separate per-task models exist.
+
 ### 7.3 Session Identity Fields
 
 These fields originate in MoldPilot and must be preserved all the way through MoldTrace
@@ -674,6 +786,7 @@ to the final labeled dataset, ensuring full traceability.
 | `session_id` | MoldPilot runtime | S3 path, MoldTrace session UUID |
 | `operator_name` | Qualification form | MoldTrace session.json |
 | `batch_number` | Qualification form | MoldTrace session.json |
+| `operator_notes` | Qualification form | MoldTrace session.json, training row traceability |
 | `markers` | Qualification form | MoldTrace session.json (for annotation events) |
 
 ### 7.4 Storage Root Conventions
@@ -715,24 +828,90 @@ needed to close the end-to-end loop.
 
 ### 8.3 Coupling Stage Completion (MoldTrace)
 
-**Status**: `coupling.py` architecture exists; temporal alignment logic is pending.
+**Status**: Implemented in MoldTrace (`coupling.py` + `couple-defects-params` CLI + optional `run --couple-defects-params` stage), including a session-level quality gate that outputs training-ready filtered records.
 
 **What's needed**:
-- Define the coupling window strategy (e.g., use the process parameters active during the
-  ±N seconds around each component's production window).
-- Implement the labeled dataset writer (JSONL per session).
-- Define the final schema for the labeled record (used as training data for suggestion logic).
+- Freeze the cross-project schema contract (`final_component_record_v1`, `training_row_v1`, and versioning policy).
+- Add downstream dataset adapters/exporters for MoldVision training formats as needed.
+
+### 8.3.1 Frozen Training-Row Construction Rule
+
+The canonical rule for startup-suggestion training is:
+
+1. One supervised row per coupled `component_id`.
+2. Input features come only from coupled process-state slots, not from defects, future observations, or operator metadata.
+3. For each process slot, export flat scalar features using the **unscoped** `parameter_id_base` as the key root (never the page-scoped form `page|subpage|param_id`):
+   `last`, `mean`, `median`, `min`, `max`, `q05`, `q95`, `coverage_ratio`, `n_points_accepted`, `n_points_total`.
+4. Targets are derived per defect class plus a global scalar quality score:
+   - binary occurrence: `y_defect_<label>`
+   - continuous burden: `y_burden_<label>`
+   - per-instance severity: `y_max_severity_<label>`, `y_top2_severity_<label>`
+   - global score: `y_quality_score = 1 - clamp(sum(weight_i * burden_i), 0, 1)`
+5. Default quality-score weights:
+   - `Sink_Mark`: `0.35`
+   - `Flash`: `0.30`
+   - `Burn_Mark`: `0.20`
+   - `Weld_Line`: `0.15`
+6. A row is training-ready only when:
+   - the coupling quality gate marks the source record ready,
+   - recording mode is `qualification` unless explicitly disabled,
+   - the machine-family critical-slot manifest rule is satisfied.
+7. Session traceability fields — including `operator_notes` — are preserved in each row for auditability but are excluded from model inputs by default.
+8. Each row carries `context.defect_classes_monitored`: the list of defect classes the detection model was configured to find at annotation time. This distinguishes truly clean components (all targets zero because no defect was present) from unannotated ones (model did not cover a class). Pass the model bundle's `classes` list to `export_training_rows(defect_classes_monitored=...)` when available.
+9. `window.process_video_ids` is always a list of all process video IDs that contributed observations to this row (typically one entry per 60 s chunk). `window.process_video_id` is retained for single-video compatibility but will be `"multiple"` when more than one chunk is involved; use `process_video_ids` for authoritative per-chunk traceability.
+10. Each row carries HMI layout identity in the `context` block: `hmi_layout_id`, `hmi_layout_version`, `machine_family`. These are resolved from the session directory (session.json or layout_resolved snapshot). They are `null` when no session directory is provided.
+11. Each row carries `context.feature_keys`: the sorted list of feature column names this specific row provides. Different machines with different HMI layouts will have different `feature_keys` sets. The export summary includes `features.union_feature_keys` (union of all column names seen), `features.hmi_layouts_seen` (distinct layout tuples), and `features.schema_homogeneous` (true only when all rows share the exact same feature set). MoldVision must check `schema_homogeneous` before training and choose an alignment strategy (per-family model or union schema with NaN) — see `docs/MoldVision_Predictive_Model_Plan.md §12`.
+
+Machine-family critical-slot policy is loaded from a manifest and resolved in this order:
+1. session metadata fields (`company`, `machine_family`, `layout_id`, `layout_version`) when present;
+2. resolved layout snapshot under `artifacts/process_monitoring/layout/layout_resolved_<video_id>.json`;
+3. explicit CLI overrides.
+
+The repository-level default manifest is:
+`configs/training/machine_family_critical_slots.json`
+
+This rule is designed to support:
+- tree-based baselines,
+- later neural/ONNX export,
+- online inference compatibility in MoldPilot Startup Assistant,
+- reproducible retraining as new qualification sessions accumulate.
 
 ### 8.4 Labeled Dataset → Suggestion Model (MoldTrace → MoldPilot)
 
-**Status**: No implementation yet. `MockStartupAssistantService` provides synthetic data.
+**Status**:
+- `training_row_v1` export is implemented in MoldTrace, with formal JSON Schema at
+  `schemas/training_row_v1.schema.json`.
+- **Tier 0** `RuleBasedStartupAssistantService` is implemented in MoldPilot — replaces the
+  `MockStartupAssistantService` for production use. Domain rules map 4 defect types to
+  10 machine parameters with severity-weighted conflict resolution.
+- **MoldVision** `predictive` module can load, validate, and summarize `training_row_v1`
+  datasets via `moldvision predictive validate-dataset`.
 
-**What's needed**:
-- Decide on the model type for suggestion logic (e.g., gradient boosted trees, simple MLP,
-  rule-based lookup). Input: process parameters. Output: defect risk scores or parameter adjustments.
-- Train on accumulated labeled datasets from MoldTrace.
-- Export to ONNX or a lightweight JSON rule-set.
-- Wire into `StartupAssistantService` in MoldPilot (replace the mock).
+**What's needed next**:
+- Train a GBT offline prior in MoldVision on accumulated `training_row_v1` data (Tier 1).
+  Input: process parameter feature vector. Output: `{ quality_score, defect_risks_by_class }`.
+- Export as a startup-suggestion bundle (`.bundle` artifact).
+- Wire the bundle into `StartupAssistantService` in MoldPilot — Tier 1 (overrides Tier 0).
+- Implement `StartupAdaptationService` in MoldPilot — Tier 2 (online GP adaptation):
+  - GP surrogate initialised from Tier 1 predictions.
+  - Updated after each startup shot with live `(θ_shot, q_shot)` observations.
+  - EI acquisition proposes the next parameter vector.
+  - Resets at new mould startup session start.
+  - Falls back to Tier 1 (then Tier 0) when fewer than 3 observations are available.
+
+**Architecture summary**:
+- Dataset construction: MoldTrace (AWS).
+- Offline predictive model training/export: MoldVision (ARIA local workstation).
+- Runtime inference (Tier 1) + online adaptation (Tier 2): MoldPilot (customer edge).
+- Tier 0 domain rules: MoldPilot (always available, no artefact needed).
+- Tier 2 is an algorithm in MoldPilot, **not** a MoldVision artefact.
+
+**Twin-machine note**: The offline GBT prior is trained on qualification sessions from machine X.
+Startup may run on machine Y (a mechanical twin with systematic parameter offsets). Tier 2 corrects
+for this domain shift using live defect observations from the first few startup shots — no extra data
+pipeline required beyond what Monitoring Mode already produces.
+
+Detailed implementation plan: `docs/MoldVision_Predictive_Model_Plan.md`
 
 ### 8.5 MoldVision Dataset Schema for Labeled Images
 
@@ -754,6 +933,23 @@ formalised yet.
 - Update MoldVision's `bundle.py` to write `format_version: 2` as default.
 - Update MoldPilot's `model_registry.py` to accept v2 manifests.
 - Document the v1 → v2 diff (v2 adds `masks` output key support for segmentation models).
+
+### 8.7 Formal training_row_v1 JSON Schema Contract
+
+**Status**: ✅ Implemented. `schemas/training_row_v1.schema.json` (JSON Schema 2020-12) is the
+single source of truth for the interchange format between MoldTrace (producer) and MoldVision
+(consumer).
+
+**Covers**:
+- All required top-level keys: `schema_version`, `features`, `targets`, `context`, `traceability`, `window`.
+- Eligibility gates: `targets.quality_score` and `features` must each have ≥ 1 non-null value.
+- Feature key pattern: `^[a-z][a-z0-9_]*:[A-Z][A-Za-z0-9_]+$` (parameter_id_base:slot_id).
+- Target key patterns: `quality_score`, `defect_risk_*`, `defect_burden_*`, `defect_count_*`.
+- Context requirements: `hmi_layout_id`, `hmi_layout_version`, `machine_family`, `feature_keys`.
+
+**Validation**:
+- MoldVision `predictive validate-dataset` checks rows against this schema's invariants.
+- CI pipelines can use `jsonschema` to validate MoldTrace output directly.
 
 ---
 
@@ -835,7 +1031,11 @@ moldvision bundle -d <UUID> -w checkpoint_best_total.pth `
 | **HMI Layout** | JSON definition of screen ROIs used by MoldTrace to extract process parameters |
 | **Coupling** | MoldTrace step that aligns component defects with contemporaneous process parameter values |
 | **Labeled Dataset** | Output of coupling: structured records linking process state to surface quality |
-| **Suggestion Logic** | Future ML model in MoldPilot that turns labeled datasets into operator recommendations |
+| **Suggestion Logic** | Two-layer system in MoldPilot: offline GBT prior (Layer 1, from MoldVision bundle) + online GP adaptation (Layer 2, session-scoped algorithm) that provides parameter recommendations to operators during startup |
+| **Offline Prior** | Layer 1 of the suggestion system: a GBT model trained in MoldVision on `training_row_v1` and exported as a startup-suggestion bundle; provides global knowledge from qualification sessions |
+| **Online Bayesian Adaptation** | Layer 2 of the suggestion system: a Gaussian Process surrogate in MoldPilot, initialised from the offline prior and updated per startup shot with live defect observations; corrects for twin-machine domain shift |
+| **Twin-Machine Problem** | The domain shift that arises when a model trained on qualification data from machine X is applied during startup on machine Y (a mechanical twin); addressed by Layer 2 online adaptation |
+| **Training Row (training_row_v1)** | Supervised-learning row produced by MoldTrace coupling: process parameter features + quality/defect targets + traceability; the primary input to MoldVision predictive training |
 | **RF-DETR** | Real-time Fast Detection Transformer — the object detection / segmentation architecture used |
 | **Component_Base** | Class ID 0: the physical part being inspected (non-defect anchor box) |
 | **IoU Tracker** | Simple SORT-like bounding-box tracker using intersection-over-union assignment |
