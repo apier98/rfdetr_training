@@ -143,9 +143,15 @@ class TestValidateRow(unittest.TestCase):
 
     def test_wrong_schema_version(self) -> None:
         row = _make_row()
-        row["schema_version"] = "training_row_v2"
+        row["schema_version"] = "training_row_v99"
         errors = validate_row(row)
         self.assertTrue(any("schema_version" in e for e in errors))
+
+    def test_v2_schema_accepted(self) -> None:
+        row = _make_row()
+        row["schema_version"] = "training_row_v2"
+        errors = validate_row(row)
+        self.assertFalse(any("schema_version" in e for e in errors))
 
     def test_missing_features(self) -> None:
         row = _make_row()

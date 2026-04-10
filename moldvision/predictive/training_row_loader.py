@@ -1,4 +1,7 @@
-"""Load, validate and extract feature matrices from ``training_row_v1`` JSONL.
+"""Load, validate and extract feature matrices from training row JSONL.
+
+Supports both ``training_row_v1`` (legacy spread statistics) and
+``training_row_v2`` (setpoint-centric features with active_ratio).
 
 This module is the bridge between MoldTrace (which produces supervised rows)
 and MoldVision predictive training (which consumes them).  It is intentionally
@@ -16,7 +19,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # -- schema constants --------------------------------------------------------
 
-SCHEMA_VERSION = "training_row_v1"
+SCHEMA_VERSION = "training_row_v2"
+ACCEPTED_SCHEMA_VERSIONS = frozenset(["training_row_v1", "training_row_v2"])
 
 REQUIRED_TOP_KEYS = frozenset(
     ["schema_version", "session_id", "component_id", "eligibility",
@@ -73,9 +77,9 @@ def validate_row(row: dict) -> List[str]:
         return [f"Row is {type(row).__name__}, expected dict"]
 
     sv = row.get("schema_version")
-    if sv != SCHEMA_VERSION:
+    if sv not in ACCEPTED_SCHEMA_VERSIONS:
         errors.append(
-            f"schema_version is {sv!r}, expected {SCHEMA_VERSION!r}"
+            f"schema_version is {sv!r}, expected one of {sorted(ACCEPTED_SCHEMA_VERSIONS)}"
         )
 
     missing_top = REQUIRED_TOP_KEYS - set(row.keys())
@@ -260,7 +264,7 @@ def extract_targets(
 # -- dataset summary ---------------------------------------------------------
 
 def summarize_dataset(rows: Sequence[dict]) -> Dict[str, Any]:
-    """Produce a human-readable summary of a training_row_v1 dataset."""
+    """Produce a human-readable summary of a training row dataset (v1 or v2)."""
     eligible = filter_eligible(rows)
     homogeneity = check_schema_homogeneity(rows)
     feature_keys = infer_feature_keys(rows)
@@ -291,3 +295,28 @@ def summarize_dataset(rows: Sequence[dict]) -> Dict[str, Any]:
         },
         "defect_counts": dict(sorted(defect_counts.items())),
     }
+
+
+# -- union-schema alignment (B1) -------------------------------------------
+
+def compute_union_feature_keys(rows: Sequence[dict]) -> List[str]:
+    """Return sorted union of all ``context.feature_keys`` across rows.
+
+    This is the superset schema needed to train on pooled data from
+    heterogeneous HMI layouts.
+    """
+    return infer_feature_keys(rows)
+
+
+def align_to_union_schema(
+    rows: Sequence[dict],
+    union_keys: Optional[List[str]] = None,
+) -> Tuple[List[List[Optional[float]]], List[str]]:
+    """Align rows from heterogeneous layouts to a shared union schema.
+
+    Missing columns are filled with ``None`` (GBT models handle NaN natively).
+    This is a convenience wrapper around ``extract_feature_matrix``.
+    """
+    if union_keys is None:
+        union_keys = compute_union_feature_keys(rows)
+    return extract_feature_matrix(rows, feature_keys=union_keys)
