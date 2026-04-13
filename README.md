@@ -1,6 +1,6 @@
 # ARIA_MoldVision
 
-Integrated system for defect detection models, from dataset preparation to training and deployment.
+Integrated system for computer-vision defect detection and predictive startup-suggestion models, from data preparation to training and deployment.
 
 ## What you can do
 
@@ -12,8 +12,10 @@ Integrated system for defect detection models, from dataset preparation to train
 - Subsample COCO splits (stratified by class + proportional background)
 - Normalize COCO category ids to contiguous `0..N-1` (fixes common training issues)
 - Train defect detection models (detect or seg)
+- Train predictive startup-suggestion models from MoldTrace `training_row_v1` JSONL exports
 - Export trained models to ONNX (and optionally build TensorRT engines)
 - Create deployment bundles compatible with ARIA MoldPilot (`.mpk` format, versioned, checksummed)
+- Package predictive models into deployable `.sugbundle` archives for MoldPilot's Tier 1 Startup Assistant
 - Pre-label new images with a trained model via Label Studio (active learning loop)
 - Store persistent defaults (dataset root, num-workers, backend, export format)
 - Run `doctor` to check your environment and print common fix hints
@@ -39,6 +41,16 @@ pip install -e .
 After `pip install -e .` the `moldvision` command is available in your venv.
 Use `moldvision --help` or `python -m moldvision --help` interchangeably.
 
+Optional extras:
+
+```powershell
+# Predictive startup-suggestion training (LightGBM + ONNX export)
+pip install "aria-moldvision[predictive]"
+
+# Label Studio pre-labeling backend
+pip install "aria-moldvision[label-studio]"
+```
+
 ## Configuration
 
 MoldVision stores persistent defaults in `%LOCALAPPDATA%\ARIA\MoldVision\config.json` (Windows) or the appropriate platform config directory.
@@ -56,6 +68,9 @@ Settings are overridden by explicit CLI flags and by environment variables (`MOL
 > **Windows tip:** `num-workers` defaults to `0` to avoid DataLoader multiprocessing issues. Set it once with `config set` instead of passing `--num-workers 0` on every training run.
 
 ## Typical workflow
+
+> `moldvision train` is the **computer vision** RF-DETR workflow. For the separate
+> **predictive** startup-assistant workflow, see [Predictive training](#predictive-training-startup-assistant).
 
 ### 1) Create a dataset folder
 
@@ -178,6 +193,79 @@ Common training options:
 - Start a new run from existing weights: `--finetune-from path\to\checkpoint.pth`
 - Continue an existing run: `--resume path\to\checkpoint.pth`
 - Evaluation only (no training): `--eval-only`
+
+## Predictive training (Startup Assistant)
+
+This is a separate ML workflow from RF-DETR CV training. It trains MoldPilot's
+Tier 1 Startup Assistant from **ARIA MoldTrace** `training_row_v1` JSONL exports,
+using LightGBM models that MoldVision then converts to ONNX and packages as a
+`.sugbundle`.
+
+Use this path when you want **parameter suggestions during startup**, not image
+defect detection.
+
+### 1) Install the predictive extras
+
+```powershell
+pip install "aria-moldvision[predictive]"
+```
+
+### 2) Validate the MoldTrace export
+
+```powershell
+moldvision predictive validate-dataset `
+  --input C:\data\training_rows.jsonl `
+  --summary
+```
+
+This checks schema validity, scope coverage, HMI schema consistency, and gives a
+training-readiness summary before you spend time training.
+
+### 3) Train the predictive models
+
+```powershell
+moldvision predictive train `
+  --input C:\data\training_rows.jsonl `
+  --output-dir runs\mold-a-v1 `
+  --mold-id mold_a12 `
+  --material-id pp_natureworks_4032d
+```
+
+Notes:
+
+- `moldvision predictive train` is the predictive command; it is not the same as `moldvision train`.
+- Scope your run with `--mold-id` and `--material-id` for production bundles.
+- If your dataset mixes machine families or HMI schemas, also pass `--machine-id <family>` to train one model per machine family.
+- Training writes `train_result.pkl` and `scope.json` into `--output-dir`.
+
+### 4) Package the suggestion bundle
+
+```powershell
+moldvision predictive bundle `
+  --train-dir runs\mold-a-v1 `
+  --model-name "Mold A Startup Suggestion" `
+  --model-version 1.0.0 `
+  --sugbundle
+```
+
+This produces:
+
+- `runs\mold-a-v1\deploy\<bundle_id>\`
+- `runs\mold-a-v1\deploy\<bundle_id>.sugbundle`
+
+`predictive bundle` automatically reads `scope.json` from the training output.
+For production, keep scope complete so MoldPilot can select the correct bundle
+for the active mold/material.
+
+### 5) Install in MoldPilot
+
+Copy the `.sugbundle` to the MoldPilot machine and install it through MoldPilot's
+model registry flow. Once installed, MoldPilot upgrades the Startup Assistant
+from Tier 0 (rule-based) to Tier 1 (predictive bundle).
+
+> For the full predictive pipeline, scope rules, expected metrics, and bundle
+> internals, see `docs/MoldVision_Predictive_Model_Plan.md` and
+> `docs/BUNDLE_CONTRACT.md`.
 
 ## Data Lake
 
@@ -496,8 +584,9 @@ See `docs/TOOLS.md` for notes and recommendations.
 | `docs/DATA_LAKE_DESIGN.md` | Data lake architecture, folder layout, traceability schema, remote storage roadmap |
 | `docs/TOOLS.md` | Notes on optional scripts and inference utilities |
 | `docs/TRANSFER_AND_INFERENCE.md` | Model transfer and inference workflow notes |
-| `docs/BUNDLE_CONTRACT.md` | Bundle format spec, `manifest.json` schema, MoldPilot integration, remote update design |
+| `docs/BUNDLE_CONTRACT.md` | Bundle format spec for both CV `.mpk` bundles and predictive `.sugbundle` bundles |
 | `docs/LABELING_WORKFLOW.md` | Full Label Studio active-learning loop: pre-label → review → export → retrain |
+| `docs/MoldVision_Predictive_Model_Plan.md` | Predictive startup-assistant workflow: `training_row_v1` validation, `predictive train`, `.sugbundle` packaging |
 | `docs/ARIA_System_Integration.md` | Cross-system integration overview (MoldPilot, MoldTrace, MoldVision) |
 
 ## Dependencies
