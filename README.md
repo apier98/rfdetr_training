@@ -234,7 +234,8 @@ moldvision predictive train `
 Notes:
 
 - `moldvision predictive train` is the predictive command; it is not the same as `moldvision train`.
-- Scope your run with `--mold-id` and `--material-id` for production bundles.
+- When the input JSONL already has a single mold/material/machine scope, `predictive train` inherits it automatically into `scope.json`. Explicit `--mold-id`, `--material-id`, and `--machine-id` flags override the inferred scope.
+- Scope your run with `--mold-id` and `--material-id` for production bundles when the dataset is mixed or incomplete.
 - If your dataset mixes machine families or HMI schemas, also pass `--machine-id <family>` to train one model per machine family.
 - Training writes `train_result.pkl` and `scope.json` into `--output-dir`.
 

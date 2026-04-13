@@ -33,6 +33,29 @@ from .videos import compute_frames_for_fps, extract_frames, scan_video_dir
 from .pathutil import resolve_path
 
 
+def _infer_predictive_scope(rows: List[dict]) -> dict:
+    """Infer a single training scope from dataset rows when it is unambiguous."""
+    mold_ids = sorted({r.get("mold_id") for r in rows if r.get("mold_id")})
+    material_ids = sorted({r.get("material_id") for r in rows if r.get("material_id")})
+    machine_ids = sorted({r.get("machine_id") for r in rows if r.get("machine_id")})
+    machine_families = sorted(
+        {
+            (r.get("context") or {}).get("machine_family")
+            for r in rows
+            if (r.get("context") or {}).get("machine_family")
+        }
+    )
+    return {
+        "mold_id": mold_ids[0] if len(mold_ids) == 1 else None,
+        "material_id": material_ids[0] if len(material_ids) == 1 else None,
+        "machine_id": (
+            machine_ids[0]
+            if len(machine_ids) == 1
+            else (machine_families[0] if len(machine_families) == 1 else None)
+        ),
+    }
+
+
 def _parse_classes(values: List[str] | None, classes_file: str | None) -> List[str]:
     cls: List[str] = []
     if values:
@@ -1687,6 +1710,14 @@ def _handle_predictive_train(args) -> int:
             "WARNING: Dataset contains multiple mold/material scopes. "
             "For production training, prefer one JSONL per scope or pass --mold-id/--material-id explicitly."
         )
+
+    inferred_scope = _infer_predictive_scope(rows)
+    if scope_mold_id is None:
+        scope_mold_id = inferred_scope["mold_id"]
+    if scope_material_id is None:
+        scope_material_id = inferred_scope["material_id"]
+    if scope_machine_id is None:
+        scope_machine_id = inferred_scope["machine_id"]
 
     # Scope preflight / filtering.
     if scope_mold_id or scope_material_id or scope_machine_id:
