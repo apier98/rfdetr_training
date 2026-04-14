@@ -44,6 +44,20 @@ def _make_row(session_id: str, i: int) -> dict:
         "context": {
             "defect_classes_monitored": ["flash", "sink_mark"],
             "feature_keys": ["temp_barrel:actual.mean", "pressure_injection:actual.last"],
+            "parameter_schema": [
+                {
+                    "parameter_id": "temp_barrel",
+                    "display_name": "Barrel Temperature",
+                    "unit": "C",
+                    "baseline": 220.0,
+                    "range_min": 180.0,
+                    "range_max": 320.0,
+                    "control_feature_keys": ["temp_barrel:actual.mean"],
+                    "step_mode": "absolute",
+                    "preferred_step": 1.0,
+                    "max_delta": 5.0,
+                }
+            ],
         },
     }
 
@@ -98,6 +112,16 @@ class TestWriteSuggestionBundle(unittest.TestCase):
             )
             manifest = json.loads((bundle_dir / "manifest.json").read_text())
             self.assertEqual(manifest["feature_keys"], result.feature_keys)
+
+    def test_manifest_parameter_schema_match(self) -> None:
+        from moldvision.predictive.suggestion_bundle import write_suggestion_bundle
+        result = self._train()
+        with tempfile.TemporaryDirectory() as td:
+            bundle_dir = write_suggestion_bundle(
+                Path(td), result, model_name="startup-suggestion", model_version="0.0.1"
+            )
+            manifest = json.loads((bundle_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["parameter_schema"], result.parameter_schema)
 
     def test_onnx_files_present(self) -> None:
         from moldvision.predictive.suggestion_bundle import write_suggestion_bundle

@@ -9,6 +9,7 @@ from pathlib import Path
 from moldvision.predictive.training_row_loader import (
     assess_training_readiness,
     check_schema_homogeneity,
+    extract_parameter_schema,
     extract_feature_matrix,
     extract_targets,
     filter_eligible,
@@ -31,6 +32,7 @@ def _make_row(
     feature_keys: list[str] | None = None,
     hmi_layout_id: str | None = "layout_A",
     machine_family: str | None = "FAMILY_A",
+    parameter_schema: list[dict] | None = None,
 ) -> dict:
     """Build a minimal valid training_row_v1 record."""
     if features is None:
@@ -94,6 +96,7 @@ def _make_row(
             "hmi_layout_version": "v1",
             "machine_family": machine_family,
             "feature_keys": feature_keys,
+            "parameter_schema": parameter_schema or [],
         },
     }
 
@@ -240,6 +243,35 @@ class TestFeatureExtraction(unittest.TestCase):
         self.assertEqual(cols, ["temp_barrel:actual.last"])
         self.assertEqual(len(matrix[0]), 1)
         self.assertEqual(matrix[0][0], 221.0)
+
+    def test_extract_parameter_schema_merged_and_filtered(self) -> None:
+        rows = [
+            _make_row(
+                parameter_schema=[
+                    {
+                        "parameter_id": "temp_barrel",
+                        "display_name": "Barrel Temperature",
+                        "unit": "C",
+                        "baseline": 220.0,
+                        "range_min": 180.0,
+                        "range_max": 320.0,
+                        "control_feature_keys": [
+                            "temp_barrel:actual.setpoint_end",
+                            "temp_barrel:actual.setpoint",
+                        ],
+                        "step_mode": "absolute",
+                        "preferred_step": 1.0,
+                        "max_delta": 5.0,
+                    }
+                ]
+            )
+        ]
+
+        schema = extract_parameter_schema(rows, feature_keys=["temp_barrel:actual.setpoint_end"])
+
+        self.assertEqual(len(schema), 1)
+        self.assertEqual(schema[0]["parameter_id"], "temp_barrel")
+        self.assertEqual(schema[0]["control_feature_keys"], ["temp_barrel:actual.setpoint_end"])
 
 
 class TestExtractTargets(unittest.TestCase):

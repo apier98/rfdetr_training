@@ -176,6 +176,7 @@ def write_suggestion_bundle(
         "min_app_version": min_app_version,
         "created_at":      datetime.now(timezone.utc).isoformat(),
         "feature_keys":    train_result.feature_keys,
+        "parameter_schema": train_result.parameter_schema,
         "imputation_values": {
             k: round(v, 8) for k, v in train_result.imputation_values.items()
         },

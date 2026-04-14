@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from .training_row_loader import (
     align_to_union_schema,
+    extract_parameter_schema,
     extract_targets,
     filter_eligible,
     infer_feature_keys,
@@ -89,6 +90,7 @@ class TargetResult:
 class TrainResult:
     feature_keys: List[str]
     imputation_values: Dict[str, float]  # per-feature mean (or 0) for NaN imputation
+    parameter_schema: List[Dict[str, Any]]
     targets: Dict[str, TargetResult]
     null_strategy: Literal["mean_impute", "zero_impute"]
     n_eligible_rows: int
@@ -188,6 +190,7 @@ def train_suggestion_models(
     # Build feature matrix with union schema (NaN for missing columns).
     feature_keys = infer_feature_keys(eligible)
     raw_matrix, _ = align_to_union_schema(eligible, union_keys=feature_keys)
+    parameter_schema = extract_parameter_schema(eligible, feature_keys=feature_keys)
 
     # Compute imputation values from training data.
     if config.null_strategy == "mean_impute":
@@ -283,6 +286,7 @@ def train_suggestion_models(
     return TrainResult(
         feature_keys=feature_keys,
         imputation_values=fill_values,
+        parameter_schema=parameter_schema,
         targets=target_results,
         null_strategy=config.null_strategy,
         n_eligible_rows=len(eligible),

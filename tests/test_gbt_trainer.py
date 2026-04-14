@@ -56,6 +56,20 @@ def _make_row(
                 "pressure_injection:actual.last",
                 "injection_speed:actual.mean",
             ],
+            "parameter_schema": [
+                {
+                    "parameter_id": "temp_barrel",
+                    "display_name": "Barrel Temperature",
+                    "unit": "C",
+                    "baseline": 220.0,
+                    "range_min": 180.0,
+                    "range_max": 320.0,
+                    "control_feature_keys": ["temp_barrel:actual.mean"],
+                    "step_mode": "absolute",
+                    "preferred_step": 1.0,
+                    "max_delta": 5.0,
+                }
+            ],
         },
     }
 
@@ -102,6 +116,11 @@ class TestGbtTrainer(unittest.TestCase):
         result = train_suggestion_models(self.rows, config=self.config)
         for key in result.feature_keys:
             self.assertIn(key, result.imputation_values)
+
+    def test_parameter_schema_populated(self) -> None:
+        from moldvision.predictive.trainer import train_suggestion_models
+        result = train_suggestion_models(self.rows, config=self.config)
+        self.assertEqual(result.parameter_schema[0]["parameter_id"], "temp_barrel")
 
     def test_quality_score_target_trained(self) -> None:
         from moldvision.predictive.trainer import train_suggestion_models

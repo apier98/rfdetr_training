@@ -241,6 +241,76 @@ def infer_feature_keys(rows: Sequence[dict]) -> List[str]:
     return sorted(keys)
 
 
+def extract_parameter_schema(
+    rows: Sequence[dict],
+    feature_keys: Sequence[str] | None = None,
+) -> List[dict]:
+    """Merge deployable parameter schema metadata from training rows.
+
+    Rows produced by MoldTrace may carry ``context.parameter_schema`` with
+    control-feature mappings, bounds and step metadata. This helper merges those
+    entries across rows so MoldVision can preserve them in the trained bundle.
+    """
+    allowed_features = set(feature_keys) if feature_keys is not None else None
+    merged: dict[str, dict] = {}
+
+    for row in rows:
+        ctx = row.get("context") or {}
+        schema = ctx.get("parameter_schema")
+        if not isinstance(schema, list):
+            continue
+        for item in schema:
+            if not isinstance(item, dict):
+                continue
+            parameter_id = str(item.get("parameter_id") or "").strip()
+            if not parameter_id:
+                continue
+            control_feature_keys = [
+                str(key) for key in item.get("control_feature_keys", ()) if str(key).strip()
+            ]
+            if allowed_features is not None:
+                control_feature_keys = [key for key in control_feature_keys if key in allowed_features]
+            if not control_feature_keys:
+                continue
+            entry = merged.get(parameter_id)
+            if entry is None:
+                entry = {
+                    "parameter_id": parameter_id,
+                    "display_name": str(item.get("display_name", "")).strip() or parameter_id,
+                    "unit": str(item.get("unit", "")).strip() or "setpoint",
+                    "baseline": float(item.get("baseline", 0.0)),
+                    "range_min": float(item.get("range_min", item.get("baseline", 0.0))),
+                    "range_max": float(item.get("range_max", item.get("baseline", 0.0))),
+                    "control_feature_keys": [],
+                    "step_mode": str(item.get("step_mode", "absolute")).strip() or "absolute",
+                    "preferred_step": float(item.get("preferred_step", 1.0)),
+                    "max_delta": float(item.get("max_delta", item.get("preferred_step", 1.0))),
+                    "decimal_places": item.get("decimal_places"),
+                }
+                merged[parameter_id] = entry
+            for key in control_feature_keys:
+                if key not in entry["control_feature_keys"]:
+                    entry["control_feature_keys"].append(key)
+            if entry["display_name"] == parameter_id and item.get("display_name"):
+                entry["display_name"] = str(item.get("display_name")).strip() or parameter_id
+            if entry["unit"] == "setpoint" and item.get("unit"):
+                entry["unit"] = str(item.get("unit")).strip() or "setpoint"
+            entry["range_min"] = min(float(entry["range_min"]), float(item.get("range_min", entry["range_min"])))
+            entry["range_max"] = max(float(entry["range_max"]), float(item.get("range_max", entry["range_max"])))
+            entry["preferred_step"] = min(
+                float(entry["preferred_step"]),
+                float(item.get("preferred_step", entry["preferred_step"])),
+            )
+            entry["max_delta"] = min(
+                float(entry["max_delta"]),
+                float(item.get("max_delta", entry["max_delta"])),
+            )
+            if entry.get("decimal_places") is None and item.get("decimal_places") is not None:
+                entry["decimal_places"] = item.get("decimal_places")
+
+    return [merged[key] for key in sorted(merged)]
+
+
 def check_schema_homogeneity(rows: Sequence[dict]) -> Dict[str, Any]:
     """Check whether all rows share the same feature schema.
 
