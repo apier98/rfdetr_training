@@ -162,6 +162,8 @@ class TestWriteSuggestionBundle(unittest.TestCase):
             meta = json.loads(meta_path.read_text())
             self.assertIn("n_eligible_rows", meta)
             self.assertIn("cv_metrics", meta)
+            self.assertEqual(meta["null_strategy"], "native_missing")
+            self.assertIn("min_feature_presence_ratio", meta["lgbm_config"])
 
     def test_pack_sugbundle_creates_zip(self) -> None:
         from moldvision.predictive.suggestion_bundle import pack_sugbundle, write_suggestion_bundle

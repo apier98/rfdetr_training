@@ -1783,6 +1783,7 @@ def _handle_predictive_train(args) -> int:
         learning_rate=args.learning_rate,
         cv_folds=args.cv_folds,
         null_strategy=args.null_strategy,
+        min_feature_presence_ratio=args.min_feature_presence_ratio,
     )
 
     eligible_count = sum(

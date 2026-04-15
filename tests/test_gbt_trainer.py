@@ -116,6 +116,7 @@ class TestGbtTrainer(unittest.TestCase):
         result = train_suggestion_models(self.rows, config=self.config)
         for key in result.feature_keys:
             self.assertIn(key, result.imputation_values)
+        self.assertEqual(result.null_strategy, "native_missing")
 
     def test_parameter_schema_populated(self) -> None:
         from moldvision.predictive.trainer import train_suggestion_models
@@ -162,6 +163,36 @@ class TestGbtTrainer(unittest.TestCase):
         cfg = GbtTrainingConfig(n_estimators=5, cv_folds=2, min_rows=5, null_strategy="mean_impute")
         result = train_suggestion_models(rows, config=cfg)
         self.assertIn("quality_score", result.targets)
+
+    def test_nan_handling_native_missing(self) -> None:
+        """Rows with missing features should not crash native-missing training."""
+        from moldvision.predictive.trainer import GbtTrainingConfig, train_suggestion_models
+        rows = _make_rows(30)
+        for i, row in enumerate(rows):
+            if i % 2 == 0:
+                row["features"].pop("injection_speed:actual.mean", None)
+                row["context"]["feature_keys"] = [
+                    key for key in row["context"]["feature_keys"]
+                    if key != "injection_speed:actual.mean"
+                ]
+        cfg = GbtTrainingConfig(n_estimators=5, cv_folds=2, min_rows=5, null_strategy="native_missing")
+        result = train_suggestion_models(rows, config=cfg)
+        self.assertIn("quality_score", result.targets)
+        self.assertEqual(result.null_strategy, "native_missing")
+
+    def test_sparse_feature_pruning_drops_rare_columns(self) -> None:
+        from moldvision.predictive.trainer import GbtTrainingConfig, train_suggestion_models
+        rows = _make_rows(30)
+        rows[0]["features"]["rare_slot:actual.mean"] = 42.0
+        rows[0]["context"]["feature_keys"].append("rare_slot:actual.mean")
+        cfg = GbtTrainingConfig(
+            n_estimators=5,
+            cv_folds=2,
+            min_rows=5,
+            min_feature_presence_ratio=0.10,
+        )
+        result = train_suggestion_models(rows, config=cfg)
+        self.assertNotIn("rare_slot:actual.mean", result.feature_keys)
 
 
 @unittest.skipUnless(_PREDICTIVE_AVAILABLE, "lightgbm / scikit-learn not installed")

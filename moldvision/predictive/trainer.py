@@ -64,7 +64,8 @@ class GbtTrainingConfig:
     random_state: int = 42
     cv_folds: int = 5
     early_stopping_rounds: int = 30
-    null_strategy: Literal["mean_impute", "zero_impute"] = "mean_impute"
+    null_strategy: Literal["native_missing", "mean_impute", "zero_impute"] = "native_missing"
+    min_feature_presence_ratio: float = 0.05
     #: Minimum eligible rows required to attempt training.
     min_rows: int = 10
 
@@ -89,10 +90,10 @@ class TargetResult:
 @dataclass
 class TrainResult:
     feature_keys: List[str]
-    imputation_values: Dict[str, float]  # per-feature mean (or 0) for NaN imputation
+    imputation_values: Dict[str, float]  # fallback values for legacy/runtime compatibility
     parameter_schema: List[Dict[str, Any]]
     targets: Dict[str, TargetResult]
-    null_strategy: Literal["mean_impute", "zero_impute"]
+    null_strategy: Literal["native_missing", "mean_impute", "zero_impute"]
     n_eligible_rows: int
     config: GbtTrainingConfig = field(repr=False)
 
@@ -132,6 +133,61 @@ def _impute(
             for i, val in enumerate(row)
         ])
     return result
+
+
+def _to_native_missing_matrix(
+    matrix: List[List[Optional[float]]],
+) -> List[List[float]]:
+    """Replace None with NaN so LightGBM can learn native missing-value splits."""
+    result: List[List[float]] = []
+    for row in matrix:
+        result.append([
+            float(val) if val is not None else float("nan")
+            for val in row
+        ])
+    return result
+
+
+def _presence_ratio_by_feature(
+    matrix: List[List[Optional[float]]],
+    feature_keys: List[str],
+) -> Dict[str, float]:
+    n_rows = len(matrix)
+    if n_rows <= 0:
+        return {key: 0.0 for key in feature_keys}
+    counts: Dict[str, int] = {key: 0 for key in feature_keys}
+    for row in matrix:
+        for idx, val in enumerate(row):
+            if val is not None:
+                counts[feature_keys[idx]] += 1
+    return {
+        key: (float(counts[key]) / float(n_rows))
+        for key in feature_keys
+    }
+
+
+def _prune_sparse_features(
+    matrix: List[List[Optional[float]]],
+    feature_keys: List[str],
+    *,
+    min_presence_ratio: float,
+) -> Tuple[List[List[Optional[float]]], List[str], Dict[str, float]]:
+    ratios = _presence_ratio_by_feature(matrix, feature_keys)
+    if not feature_keys:
+        return matrix, feature_keys, ratios
+    threshold = max(0.0, min(1.0, float(min_presence_ratio)))
+    keep_indices = [
+        idx for idx, key in enumerate(feature_keys)
+        if ratios.get(key, 0.0) >= threshold
+    ]
+    if not keep_indices:
+        keep_indices = list(range(len(feature_keys)))
+    kept_keys = [feature_keys[idx] for idx in keep_indices]
+    kept_matrix: List[List[Optional[float]]] = []
+    for row in matrix:
+        kept_matrix.append([row[idx] for idx in keep_indices])
+    kept_ratios = {key: ratios[key] for key in kept_keys}
+    return kept_matrix, kept_keys, kept_ratios
 
 
 # ---------------------------------------------------------------------------
@@ -187,18 +243,27 @@ def train_suggestion_models(
             "Accumulate more qualification sessions before training."
         )
 
-    # Build feature matrix with union schema (NaN for missing columns).
-    feature_keys = infer_feature_keys(eligible)
-    raw_matrix, _ = align_to_union_schema(eligible, union_keys=feature_keys)
+    # Build feature matrix with union schema (None for missing columns), then
+    # prune ultra-sparse features before training.
+    union_feature_keys = infer_feature_keys(eligible)
+    raw_matrix, _ = align_to_union_schema(eligible, union_keys=union_feature_keys)
+    raw_matrix, feature_keys, feature_presence = _prune_sparse_features(
+        raw_matrix,
+        union_feature_keys,
+        min_presence_ratio=config.min_feature_presence_ratio,
+    )
     parameter_schema = extract_parameter_schema(eligible, feature_keys=feature_keys)
 
-    # Compute imputation values from training data.
-    if config.null_strategy == "mean_impute":
-        fill_values = _compute_means(raw_matrix, feature_keys)
-    else:
-        fill_values = {k: 0.0 for k in feature_keys}
+    # Compute fallback values from training data for legacy/runtime compatibility.
+    fill_values = _compute_means(raw_matrix, feature_keys)
 
-    X = np.array(_impute(raw_matrix, fill_values, feature_keys), dtype=np.float32)
+    if config.null_strategy == "native_missing":
+        X = np.array(_to_native_missing_matrix(raw_matrix), dtype=np.float32)
+    elif config.null_strategy == "mean_impute":
+        X = np.array(_impute(raw_matrix, fill_values, feature_keys), dtype=np.float32)
+    else:
+        zero_fill_values = {k: 0.0 for k in feature_keys}
+        X = np.array(_impute(raw_matrix, zero_fill_values, feature_keys), dtype=np.float32)
 
     target_results: Dict[str, TargetResult] = {}
 

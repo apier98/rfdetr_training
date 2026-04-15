@@ -158,6 +158,7 @@ def write_suggestion_bundle(
             "n_estimators": train_result.config.n_estimators,
             "learning_rate": train_result.config.learning_rate,
             "num_leaves": train_result.config.num_leaves,
+            "min_feature_presence_ratio": train_result.config.min_feature_presence_ratio,
         },
     }
     _save_json(bundle_dir / "training_meta.json", training_meta)

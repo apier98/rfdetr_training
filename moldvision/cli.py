@@ -649,8 +649,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="LightGBM learning rate (default: 0.05)",
     )
     pred_train.add_argument(
-        "--null-strategy", choices=["mean_impute", "zero_impute"], default="mean_impute",
-        help="Strategy for imputing missing feature values (default: mean_impute)",
+        "--null-strategy", choices=["native_missing", "mean_impute", "zero_impute"], default="native_missing",
+        help="Strategy for missing feature values during training/runtime (default: native_missing)",
+    )
+    pred_train.add_argument(
+        "--min-feature-presence-ratio", type=float, default=0.05,
+        help="Drop feature columns present in fewer than this fraction of eligible rows (default: 0.05)",
     )
     pred_train.add_argument(
         "--mold-id", default=None,
