@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from .lake_storage import LocalLakeStorage, make_storage
+from .appconfig import get_shared_root
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -84,6 +85,9 @@ class LakeConfig:
         env = os.environ.get(ENV_LAKE_ROOT)
         if env:
             return Path(env)
+        shared_root = get_shared_root()
+        if shared_root is not None:
+            return shared_root / "lake"
         if sys.platform == "win32":
             return _DEFAULT_ROOT_WIN
         return _DEFAULT_ROOT_UNIX

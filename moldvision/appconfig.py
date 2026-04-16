@@ -27,6 +27,7 @@ ENV_DATASETS = "MOLDVISION_DATASETS"
 ENV_NUM_WORKERS = "MOLDVISION_NUM_WORKERS"
 ENV_BACKEND = "MOLDVISION_BACKEND"
 ENV_EXPORT_FORMAT = "MOLDVISION_EXPORT_FORMAT"
+ENV_SHARED_ROOT = "ARIA_SHARED_ROOT"
 
 _APP_NAME_WIN = "ARIA\\MoldVision"   # %LOCALAPPDATA%\ARIA\MoldVision  (aligned with other ARIA apps)
 _APP_NAME_UNIX = "moldvision"
@@ -216,3 +217,14 @@ def set_setting(key: str, value: Any) -> None:
     cfg = load_config()
     cfg[key] = value
     save_config(cfg)
+
+
+def get_shared_root() -> Optional[Path]:
+    """Return the configured ARIA shared root, or ``None`` if unset."""
+    env = os.environ.get(ENV_SHARED_ROOT)
+    if env:
+        return Path(env).expanduser().resolve()
+    value = get_setting("shared_root")
+    if isinstance(value, str) and value.strip():
+        return Path(value).expanduser().resolve()
+    return None

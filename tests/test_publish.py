@@ -171,3 +171,19 @@ class TestPublishBundle:
         bundle_ids = [m["bundle_id"] for m in catalog["models"]]
         assert "old-model-v0.9.0" in bundle_ids
         assert "test-detector-v1.0.0" in bundle_ids
+
+    def test_publish_to_shared_root_writes_bundle_directory_and_index(self, bundle_dir, tmp_path, monkeypatch):
+        shared_root = tmp_path / "shared"
+        monkeypatch.setenv("ARIA_SHARED_ROOT", str(shared_root))
+        monkeypatch.setenv("ARIA_MODEL_PUBLISH_TARGET", "shared")
+
+        result = publish_bundle(bundle_dir, role="defect_detector")
+
+        published_root = shared_root / "published" / "moldpilot" / "detection"
+        bundle_copy = published_root / "bundles" / "test-detector-v1.0.0"
+        assert result["publish_target"] == "shared"
+        assert bundle_copy.exists()
+        assert (bundle_copy / "manifest.json").exists()
+        index = json.loads((published_root / "index.json").read_text(encoding="utf-8"))
+        assert index["active_by_channel"]["stable"] == "test-detector-v1.0.0"
+        assert index["bundles"][0]["artifact_key"] == "bundles/test-detector-v1.0.0/"

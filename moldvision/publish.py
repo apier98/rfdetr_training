@@ -8,15 +8,19 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .appconfig import get_shared_root
+
 _log = logging.getLogger(__name__)
 
 CATALOG_SCHEMA_VERSION = "catalog-v1"
 CATALOG_KEY = "catalog.json"
+_ENV_PUBLISH_TARGET = "ARIA_MODEL_PUBLISH_TARGET"
 
 
 def _sha256_file(path: Path) -> str:
@@ -123,6 +127,104 @@ def _upload_catalog(s3, bucket: str, prefix: str, catalog: Dict[str, Any]) -> No
     _log.info("Updated catalog at s3://%s/%s", bucket, key)
 
 
+def _resolve_publish_target() -> str:
+    target = os.environ.get(_ENV_PUBLISH_TARGET, "auto").strip().lower()
+    if target not in {"auto", "s3", "shared"}:
+        raise ValueError(f"Unknown publish target {target!r}. Valid: auto, s3, shared")
+    if target == "auto":
+        return "shared" if get_shared_root() is not None else "s3"
+    return target
+
+
+def _shared_publish_destination(shared_root: Path, *, role: str, manifest: Dict[str, Any]) -> Path:
+    normalized_role = role.strip().lower()
+    bundle_type = str(manifest.get("bundle_type", "")).strip().lower()
+    published = shared_root / "published"
+    if bundle_type == "startup_suggestion" or normalized_role in {
+        "startup_suggestion",
+        "startup_suggestions",
+        "suggestions",
+    }:
+        return published / "moldpilot" / "suggestions"
+    if normalized_role in {"defect_detector", "detection", "moldpilot_detection"}:
+        return published / "moldpilot" / "detection"
+    if normalized_role in {"monitor_segmenter", "components", "ocr_recognizer"}:
+        return published / "moldtrace" / "roles" / normalized_role
+    raise ValueError(f"Unsupported shared publish role: {role!r}")
+
+
+def _copy_bundle_tree(bundle_path: Path, destination_dir: Path) -> None:
+    if destination_dir.exists():
+        shutil.rmtree(destination_dir)
+    destination_dir.parent.mkdir(parents=True, exist_ok=True)
+    if bundle_path.is_dir():
+        shutil.copytree(bundle_path, destination_dir)
+        return
+    import zipfile
+
+    if not zipfile.is_zipfile(bundle_path):
+        raise ValueError(f"Expected a bundle directory or zip-compatible archive: {bundle_path}")
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(bundle_path, "r") as zf:
+        zf.extractall(destination_dir)
+
+
+def _publish_to_shared_root(
+    *,
+    shared_root: Path,
+    bundle_path: Path,
+    role: str,
+    manifest: Dict[str, Any],
+    catalog_entry: Dict[str, Any],
+    channel: str,
+    dry_run: bool,
+) -> Dict[str, Any]:
+    target_root = _shared_publish_destination(shared_root, role=role, manifest=manifest)
+    bundle_id = catalog_entry["bundle_id"]
+    bundle_dir = target_root / "bundles" / bundle_id
+    index_path = target_root / "index.json"
+
+    result = dict(catalog_entry)
+    result["publish_target"] = "shared"
+    result["destination"] = str(bundle_dir)
+    result["artifact_key"] = f"bundles/{bundle_id}/"
+
+    if dry_run:
+        _log.info("DRY RUN — would publish to shared root:\n%s", json.dumps(result, indent=2))
+        return result
+
+    _copy_bundle_tree(bundle_path, bundle_dir)
+
+    if index_path.exists():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            index = {}
+    else:
+        index = {}
+    bundles = [b for b in index.get("bundles", []) if b.get("bundle_id") != bundle_id]
+    bundles.append(
+        {
+            **catalog_entry,
+            "artifact_key": f"bundles/{bundle_id}/",
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    index = {
+        "schema_version": "published-bundles-v1",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "role": role,
+        "active_by_channel": {
+            **(index.get("active_by_channel") or {}),
+            channel: bundle_id,
+        },
+        "bundles": bundles,
+    }
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return result
+
+
 def publish_bundle(
     bundle_path: Path,
     *,
@@ -172,6 +274,23 @@ def publish_bundle(
         "supersedes": supersedes,
         "published_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    publish_target = _resolve_publish_target()
+    shared_root = get_shared_root()
+    if publish_target == "shared":
+        if shared_root is None:
+            raise RuntimeError(
+                "Shared publish target requires ARIA_SHARED_ROOT or moldvision config.shared_root."
+            )
+        return _publish_to_shared_root(
+            shared_root=shared_root,
+            bundle_path=bundle_path,
+            role=role,
+            manifest=manifest,
+            catalog_entry=catalog_entry,
+            channel=channel,
+            dry_run=dry_run,
+        )
 
     if dry_run:
         _log.info("DRY RUN — would publish:\n%s", json.dumps(catalog_entry, indent=2))
