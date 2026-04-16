@@ -13,6 +13,7 @@ Available settings (config.json keys / env vars):
   default_num_workers    MOLDVISION_NUM_WORKERS      DataLoader worker count (0 on Windows)
   inference_backend      MOLDVISION_BACKEND          Default inference backend (auto/onnx/tensorrt/pytorch)
   export_format          MOLDVISION_EXPORT_FORMAT    Default export format (onnx/tensorrt/onnx_fp16/onnx_quantized)
+  predictive_runs_root   MOLDVISION_PREDICTIVE_RUNS  Default root for local predictive training runs
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ ENV_DATASETS = "MOLDVISION_DATASETS"
 ENV_NUM_WORKERS = "MOLDVISION_NUM_WORKERS"
 ENV_BACKEND = "MOLDVISION_BACKEND"
 ENV_EXPORT_FORMAT = "MOLDVISION_EXPORT_FORMAT"
+ENV_PREDICTIVE_RUNS = "MOLDVISION_PREDICTIVE_RUNS"
 ENV_SHARED_ROOT = "ARIA_SHARED_ROOT"
 
 _APP_NAME_WIN = "ARIA\\MoldVision"   # %LOCALAPPDATA%\ARIA\MoldVision  (aligned with other ARIA apps)
@@ -204,6 +206,25 @@ def set_default_export_format(value: str) -> None:
         raise ValueError(f"Unknown format {value!r}. Choose from: {', '.join(VALID_EXPORT_FORMATS)}")
     cfg = load_config()
     cfg["export_format"] = value
+    save_config(cfg)
+
+
+def get_predictive_runs_root() -> Path:
+    """Return the default root for local predictive training runs."""
+    env = os.environ.get(ENV_PREDICTIVE_RUNS)
+    if env:
+        return Path(env).expanduser()
+    cfg = load_config()
+    value = cfg.get("predictive_runs_root")
+    if isinstance(value, str) and value.strip():
+        return Path(value).expanduser()
+    return config_dir() / "predictive_runs"
+
+
+def set_predictive_runs_root(path: str) -> None:
+    """Persist the default predictive runs root."""
+    cfg = load_config()
+    cfg["predictive_runs_root"] = str(Path(path).expanduser())
     save_config(cfg)
 
 

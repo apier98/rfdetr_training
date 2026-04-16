@@ -422,6 +422,9 @@ def build_parser() -> argparse.ArgumentParser:
     cfg_ef = cfg_set_sub.add_parser("export-format", help="Set the default export format")
     cfg_ef.add_argument("value", choices=list(appconfig.VALID_EXPORT_FORMATS), help="Format name")
 
+    cfg_pr = cfg_set_sub.add_parser("predictive-runs-root", help="Set the default local root for predictive training runs")
+    cfg_pr.add_argument("path", help="Absolute or ~ path to use for predictive train outputs when --output-dir is omitted")
+
     # -------------------------------------------------------------------------
     # lake  (ARIA Data Lake management)
     # -------------------------------------------------------------------------
@@ -645,8 +648,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to training_rows.jsonl (training_row_v1/v2 format)",
     )
     pred_train.add_argument(
-        "--output-dir", "-o", required=True,
-        help="Directory to write trained model artifacts and training_meta.json",
+        "--output-dir", "-o", default=None,
+        help="Directory to write trained model artifacts. Default: a new run folder under the local predictive-runs root.",
     )
     pred_train.add_argument(
         "--cv-folds", type=int, default=5,

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -1111,6 +1112,7 @@ def handle_config(args) -> int:
         _show("default_num_workers",  appconfig.get_default_num_workers(),  appconfig.ENV_NUM_WORKERS, "0 on Windows, 4 elsewhere")
         _show("inference_backend",    appconfig.get_default_inference_backend(), appconfig.ENV_BACKEND, "auto")
         _show("export_format",        appconfig.get_default_export_format(), appconfig.ENV_EXPORT_FORMAT, "onnx")
+        _show("predictive_runs_root", appconfig.get_predictive_runs_root(), appconfig.ENV_PREDICTIVE_RUNS, str(appconfig.config_dir() / "predictive_runs"))
         return 0
 
     if args.config_cmd == "set":
@@ -1135,6 +1137,10 @@ def handle_config(args) -> int:
             except ValueError as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 2
+        elif args.config_set_cmd == "predictive-runs-root":
+            resolved = str(Path(args.path).expanduser())
+            appconfig.set_predictive_runs_root(resolved)
+            print(f"predictive_runs_root → {resolved}")
         print(f"Saved to: {appconfig.config_path()}")
         return 0
 
@@ -1778,7 +1784,6 @@ def _handle_predictive_train(args) -> int:
     from .predictive.trainer import GbtTrainingConfig, train_suggestion_models
 
     input_path = resolve_path(args.input)
-    output_dir = resolve_path(args.output_dir)
     scope_mold_id: str | None = getattr(args, "mold_id", None)
     scope_material_id: str | None = getattr(args, "material_id", None)
     scope_machine_id: str | None = getattr(args, "machine_id", None)
@@ -1827,6 +1832,19 @@ def _handle_predictive_train(args) -> int:
         scope_material_id = inferred_scope["material_id"]
     if scope_machine_id is None:
         scope_machine_id = inferred_scope["machine_id"]
+
+    output_dir = (
+        resolve_path(args.output_dir)
+        if getattr(args, "output_dir", None)
+        else _default_predictive_train_output_dir(
+            input_path,
+            mold_id=scope_mold_id,
+            material_id=scope_material_id,
+            machine_id=scope_machine_id,
+        )
+    )
+    if not getattr(args, "output_dir", None):
+        print(f"Output directory not provided; using local predictive run folder: {output_dir}")
 
     # Scope preflight / filtering.
     if scope_mold_id or scope_material_id or scope_machine_id:
@@ -1951,6 +1969,34 @@ def _handle_predictive_train(args) -> int:
             f"material_id={scope_material_id!r}, machine_id={scope_machine_id!r})"
         )
     return 0
+
+
+def _default_predictive_train_output_dir(
+    input_path: Path,
+    *,
+    mold_id: str | None,
+    material_id: str | None,
+    machine_id: str | None,
+) -> Path:
+    root = appconfig.get_predictive_runs_root()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    parts = [
+        timestamp,
+        _slugify_predictive_component(input_path.stem or "training_rows"),
+    ]
+    if mold_id:
+        parts.append(f"mold-{_slugify_predictive_component(mold_id)}")
+    if material_id:
+        parts.append(f"material-{_slugify_predictive_component(material_id)}")
+    if machine_id:
+        parts.append(f"machine-{_slugify_predictive_component(machine_id)}")
+    return root / "__".join(parts)
+
+
+def _slugify_predictive_component(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value))
+    collapsed = "-".join(part for part in cleaned.split("-") if part)
+    return collapsed or "run"
 
 
 def _handle_predictive_bundle(args) -> int:

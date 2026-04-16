@@ -63,9 +63,10 @@ moldvision config set dataset-root D:\datasets  # default root for dataset creat
 moldvision config set num-workers 4             # dataloader workers (default: 0 on Windows)
 moldvision config set inference-backend onnx    # default backend for moldvision infer
 moldvision config set export-format onnx_fp16   # default format for moldvision export
+moldvision config set predictive-runs-root D:\moldvision-runs  # optional override for local predictive experiments
 ```
 
-Settings are overridden by explicit CLI flags and by environment variables (`MOLDVISION_DATASETS`, `MOLDVISION_NUM_WORKERS`, `MOLDVISION_BACKEND`, `MOLDVISION_EXPORT_FORMAT`).
+Settings are overridden by explicit CLI flags and by environment variables (`MOLDVISION_DATASETS`, `MOLDVISION_NUM_WORKERS`, `MOLDVISION_BACKEND`, `MOLDVISION_EXPORT_FORMAT`, `MOLDVISION_PREDICTIVE_RUNS`).
 
 > **Windows tip:** `num-workers` defaults to `0` to avoid DataLoader multiprocessing issues. Set it once with `config set` instead of passing `--num-workers 0` on every training run.
 
@@ -236,7 +237,6 @@ training-readiness summary before you spend time training.
 ```powershell
 moldvision predictive train `
   --input C:\data\training_rows.jsonl `
-  --output-dir runs\mold-a-v1 `
   --mold-id mold_a12 `
   --material-id pp_natureworks_4032d
 ```
@@ -247,7 +247,8 @@ Notes:
 - When the input JSONL already has a single mold/material/machine scope, `predictive train` inherits it automatically into `scope.json`. Explicit `--mold-id`, `--material-id`, and `--machine-id` flags override the inferred scope.
 - Scope your run with `--mold-id` and `--material-id` for production bundles when the dataset is mixed or incomplete.
 - If your dataset mixes machine families or HMI schemas, also pass `--machine-id <family>` to train one model per machine family.
-- Training writes `train_result.pkl` and `scope.json` into `--output-dir`.
+- If `--output-dir` is omitted, MoldVision creates a new local run folder under `%LOCALAPPDATA%\ARIA\MoldVision\predictive_runs\` (or the configured `predictive-runs-root`).
+- Training writes `train_result.pkl` and `scope.json` into the chosen run directory.
 
 ### 4) Package the suggestion bundle
 
@@ -273,7 +274,7 @@ for the active mold/material.
 
 With `--publish`, MoldVision publishes the bundle into `shared\published\moldpilot\suggestions\...`, and MoldPilot can sync it automatically on startup when `ARIA_SHARED_ROOT` is configured.
 
-If you omit `--publish`, copy the `.sugbundle` to the MoldPilot machine and install it through MoldPilot's local model registry flow.
+If you omit `--publish`, the trained run remains local/private and you can later decide whether to publish or to copy the `.sugbundle` manually into MoldPilot's local model registry flow.
 
 > For the full predictive pipeline, scope rules, expected metrics, and bundle
 > internals, see `docs/MoldVision_Predictive_Model_Plan.md` and

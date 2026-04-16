@@ -121,3 +121,82 @@ def test_predictive_bundle_can_publish_directly(mock_write_bundle, mock_publish,
         dry_run=False,
     )
     assert "Published:" in capsys.readouterr().out
+
+
+@patch("moldvision.predictive.trainer.train_suggestion_models")
+@patch("moldvision.predictive.training_row_loader.assess_training_readiness")
+@patch("moldvision.predictive.training_row_loader.check_schema_homogeneity")
+@patch("moldvision.predictive.training_row_loader.summarize_scope_distribution")
+@patch("moldvision.predictive.training_row_loader.validate_dataset")
+@patch("moldvision.predictive.training_row_loader.load_training_rows")
+def test_predictive_train_defaults_to_local_predictive_runs_root(
+    mock_load_rows,
+    mock_validate,
+    mock_scope_distribution,
+    mock_homogeneity,
+    mock_readiness,
+    mock_train,
+    tmp_path,
+    capsys,
+) -> None:
+    from moldvision.cli_handlers import _handle_predictive_train
+
+    input_path = tmp_path / "training_rows.jsonl"
+    input_path.write_text("{}", encoding="utf-8")
+    local_runs_root = tmp_path / "local-runs"
+
+    mock_load_rows.return_value = [
+        {
+            "mold_id": "stampo_giotto",
+            "material_id": "pc",
+            "context": {"machine_family": "PRESSA_TEST"},
+            "eligibility": {"training_ready": True},
+        }
+    ]
+    mock_validate.return_value = {"valid": True, "invalid_rows": 0, "row_errors": []}
+    mock_scope_distribution.return_value = {"distinct_scope_count": 1}
+    mock_homogeneity.return_value = {"homogeneous": True}
+    mock_readiness.return_value = {"level": "good", "message": "ready"}
+    mock_train.return_value = types.SimpleNamespace(
+        targets={
+            "quality_score": types.SimpleNamespace(
+                cv_metric_name="rmse",
+                cv_metric_value=0.1234,
+                cv_metric_std=0.01,
+            )
+        },
+        n_eligible_rows=1,
+        feature_keys=["pressure_injection:step_1.setpoint"],
+    )
+
+    args = types.SimpleNamespace(
+        input=str(input_path),
+        output_dir=None,
+        cv_folds=5,
+        n_estimators=300,
+        learning_rate=0.05,
+        null_strategy="native_missing",
+        min_feature_presence_ratio=0.05,
+        mold_id=None,
+        material_id=None,
+        machine_id=None,
+        allow_scope_filtering=False,
+    )
+
+    with patch("moldvision.cli_handlers.appconfig.get_predictive_runs_root", return_value=local_runs_root):
+        rc = _handle_predictive_train(args)
+
+    assert rc == 0
+    run_dirs = [p for p in local_runs_root.iterdir() if p.is_dir()]
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    assert (run_dir / "train_result.pkl").exists()
+    assert (run_dir / "scope.json").exists()
+    scope = json.loads((run_dir / "scope.json").read_text(encoding="utf-8"))
+    assert scope == {
+        "mold_id": "stampo_giotto",
+        "material_id": "pc",
+        "machine_id": "PRESSA_TEST",
+    }
+    output = capsys.readouterr().out
+    assert "Output directory not provided; using local predictive run folder:" in output
