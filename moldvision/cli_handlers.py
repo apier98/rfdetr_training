@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -1273,17 +1274,131 @@ def _handle_lake_external_import(args) -> int:
 
 
 def _handle_lake_session_import(args) -> int:
-    from .lake import LakeConfig
     from .lake import session_import
     cfg = _lake_cfg(args)
-    try:
-        result = session_import(
-            cfg,
-            session_meta_path=Path(args.session_meta),
-            inspection_frames_dir=Path(args.inspection_frames) if args.inspection_frames else None,
-            monitor_frames_dir=Path(args.monitor_frames) if args.monitor_frames else None,
-            overwrite=bool(args.overwrite),
+
+    def _video_exts() -> set[str]:
+        raw = getattr(args, "video_ext", None) or "mp4,avi,mov,mkv,webm,m4v,wmv,flv"
+        return {"." + e.strip().lstrip(".").lower() for e in raw.split(",") if e.strip()}
+
+    def _resolve_session_meta() -> Path:
+        if getattr(args, "session_meta", None):
+            return resolve_path(args.session_meta)
+        if getattr(args, "session_dir", None):
+            candidate = resolve_path(args.session_dir) / "session.json"
+            if candidate.exists():
+                return candidate
+            raise FileNotFoundError(f"--session-dir provided but session.json not found: {candidate}")
+        raise ValueError("Provide --session-meta or --session-dir.")
+
+    def _detect_session_videos(session_dir: Path, exts: set[str]) -> tuple[List[Path], List[Path]]:
+        videos = scan_video_dir(session_dir, exts)
+        inspection: List[Path] = []
+        monitor: List[Path] = []
+        for v in videos:
+            stem = v.stem.lower()
+            if any(k in stem for k in ("monitor", "process", "hmi")):
+                monitor.append(v)
+            elif any(k in stem for k in ("component", "inspection")):
+                inspection.append(v)
+            else:
+                # Default unknown streams to inspection, which is the common case.
+                inspection.append(v)
+        return inspection, monitor
+
+    def _extract_stream(videos: List[Path], label: str, out_dir: Path) -> int:
+        if not videos:
+            return 0
+        if getattr(args, "extract_frames", None):
+            total_frames = int(args.extract_frames)
+        else:
+            fps_val = float(getattr(args, "extract_fps", 0.5) or 0.5)
+            if fps_val <= 0:
+                raise ValueError("--extract-fps must be > 0 when --extract-frames is not set.")
+            total_frames = compute_frames_for_fps(videos, fps_val)
+            print(f"{label}: target {fps_val} fps -> ~{total_frames} frames from {len(videos)} video(s)")
+        if total_frames <= 0:
+            raise ValueError(f"{label}: computed 0 frames to extract.")
+        count = extract_frames(video_paths=videos, out_dir=out_dir, total_frames=total_frames, verbose=True)
+        print(f"{label}: extracted {count} frames -> {out_dir}")
+        return count
+
+    session_meta_path = _resolve_session_meta()
+    if not session_meta_path.exists():
+        print(f"Error: session meta not found: {session_meta_path}", file=sys.stderr)
+        return 2
+
+    insp_frames_dir: Path | None = resolve_path(args.inspection_frames) if args.inspection_frames else None
+    mon_frames_dir: Path | None = resolve_path(args.monitor_frames) if args.monitor_frames else None
+
+    inspection_videos: List[Path] = []
+    monitor_videos: List[Path] = []
+    exts = _video_exts()
+
+    if getattr(args, "inspection_videos_dir", None):
+        vd = resolve_path(args.inspection_videos_dir)
+        if not vd.is_dir():
+            print(f"Error: --inspection-videos-dir is not a directory: {vd}", file=sys.stderr)
+            return 2
+        inspection_videos.extend(scan_video_dir(vd, exts))
+
+    if getattr(args, "monitor_videos_dir", None):
+        vd = resolve_path(args.monitor_videos_dir)
+        if not vd.is_dir():
+            print(f"Error: --monitor-videos-dir is not a directory: {vd}", file=sys.stderr)
+            return 2
+        monitor_videos.extend(scan_video_dir(vd, exts))
+
+    if getattr(args, "session_dir", None):
+        session_dir = resolve_path(args.session_dir)
+        if not session_dir.is_dir():
+            print(f"Error: --session-dir is not a directory: {session_dir}", file=sys.stderr)
+            return 2
+        auto_insp, auto_mon = _detect_session_videos(session_dir, exts)
+        if not inspection_videos:
+            inspection_videos.extend(auto_insp)
+        if not monitor_videos:
+            monitor_videos.extend(auto_mon)
+
+    # Deduplicate while preserving order
+    def _dedupe(paths: List[Path]) -> List[Path]:
+        seen = set()
+        out: List[Path] = []
+        for p in paths:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    inspection_videos = _dedupe(inspection_videos)
+    monitor_videos = _dedupe(monitor_videos)
+
+    if not insp_frames_dir and not mon_frames_dir and not inspection_videos and not monitor_videos:
+        print(
+            "Error: no inputs provided. Use --inspection-frames/--monitor-frames, "
+            "--inspection-videos-dir/--monitor-videos-dir, or --session-dir.",
+            file=sys.stderr,
         )
+        return 2
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="moldvision_lake_import_") as tmp_root:
+            if inspection_videos and not insp_frames_dir:
+                insp_out = Path(tmp_root) / "inspection_frames"
+                _extract_stream(inspection_videos, "Inspection stream", insp_out)
+                insp_frames_dir = insp_out
+            if monitor_videos and not mon_frames_dir:
+                mon_out = Path(tmp_root) / "monitor_frames"
+                _extract_stream(monitor_videos, "Monitor stream", mon_out)
+                mon_frames_dir = mon_out
+
+            result = session_import(
+                cfg,
+                session_meta_path=session_meta_path,
+                inspection_frames_dir=insp_frames_dir,
+                monitor_frames_dir=mon_frames_dir,
+                overwrite=bool(args.overwrite),
+            )
         verb = "Updated" if result.already_existed else "Imported"
         print(f"{verb} session: {result.session_id}")
         print(f"  Inspection frames: {result.inspection_frames_added}")

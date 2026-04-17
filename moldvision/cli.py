@@ -460,10 +460,20 @@ def build_parser() -> argparse.ArgumentParser:
     lk_sess = lk_sub.add_parser("session", help="Session-level commands (import, list)")
     lk_sess_sub = lk_sess.add_subparsers(dest="lake_session_cmd", required=True)
 
-    lk_imp = lk_sess_sub.add_parser("import", help="Import a qual session's raw frames into the lake")
-    lk_imp.add_argument("--session-meta", required=True, help="Path to session JSON (MoldPilot manifest or MoldTrace session.json)")
+    lk_imp = lk_sess_sub.add_parser("import", help="Import a qual session into the lake (from extracted frames or directly from videos)")
+    lk_imp.add_argument("--session-meta", default=None, help="Path to session JSON (MoldPilot manifest or MoldTrace session.json)")
+    lk_imp.add_argument("--session-dir", default=None,
+                        help="MoldPilot session folder containing session.json and chunk videos (auto-detects streams)")
     lk_imp.add_argument("--inspection-frames", default=None, help="Directory of extracted inspection JPEGs")
     lk_imp.add_argument("--monitor-frames", default=None, help="Directory of extracted monitor JPEGs")
+    lk_imp.add_argument("--inspection-videos-dir", default=None, help="Directory of inspection videos to extract from (e.g., component_view_chunk_*.mp4)")
+    lk_imp.add_argument("--monitor-videos-dir", default=None, help="Directory of monitor/process videos to extract from")
+    lk_imp.add_argument("--video-ext", default="mp4,avi,mov,mkv,webm,m4v,wmv,flv",
+                        help="Comma-separated video extensions to scan in video dirs (default: mp4,avi,mov,mkv,webm,m4v,wmv,flv)")
+    lk_imp.add_argument("--extract-fps", type=float, default=0.5,
+                        help="Target extraction FPS when importing from videos (default: 0.5)")
+    lk_imp.add_argument("--extract-frames", type=int, default=None,
+                        help="Exact total frames to extract per stream when importing from videos (overrides --extract-fps)")
     lk_imp.add_argument("--overwrite", action="store_true", help="Overwrite if session already exists")
     lk_imp.add_argument("--lake-root", default=None, help="Override lake root path")
 

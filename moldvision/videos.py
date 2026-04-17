@@ -81,16 +81,35 @@ def extract_frames(
     if total_available_frames == 0:
         raise RuntimeError("No frames available in the provided videos.")
 
-    # 2. Calculate how many frames to take from each video
-    # Proportional distribution
-    frames_to_extract = []
+    # 2. Calculate how many frames to take from each video.
+    # Keep proportional distribution, but ensure representation across videos
+    # when the requested budget allows it.
+    frames_to_extract = [0] * len(video_infos)
     current_total = 0
-    for info in video_infos:
-        count = int((info["available"] / total_available_frames) * total_frames)
-        # Ensure we don't exceed available frames
-        count = min(count, info["available"])
-        frames_to_extract.append(count)
-        current_total += count
+
+    if total_frames >= len(video_infos):
+        # Guarantee at least one sample per video.
+        for i, info in enumerate(video_infos):
+            if info["available"] > 0:
+                frames_to_extract[i] = 1
+                current_total += 1
+
+    remaining_total = max(0, total_frames - current_total)
+    if remaining_total > 0:
+        remaining_capacity = [
+            max(0, info["available"] - frames_to_extract[i])
+            for i, info in enumerate(video_infos)
+        ]
+        total_remaining_capacity = sum(remaining_capacity)
+        if total_remaining_capacity > 0:
+            for i, info in enumerate(video_infos):
+                cap = remaining_capacity[i]
+                if cap <= 0:
+                    continue
+                count = int((cap / total_remaining_capacity) * remaining_total)
+                count = min(count, cap)
+                frames_to_extract[i] += count
+                current_total += count
         
     # Adjust if we are slightly off due to rounding
     diff = total_frames - current_total

@@ -104,6 +104,7 @@ moldvision dataset extract-frames -v video1.mp4 -n 100 -o my_frames/
 ```
 
 Frames are saved in `datasets/<UUID>/raw/`. You can mix `--videos` and `--videos-dir` in the same command.
+With `-n/--num-frames`, the value is the total across all input videos; when the requested total is at least the number of videos, MoldVision guarantees at least one sampled frame per video and distributes the rest proportionally by video length.
 
 ### 1c) (Optional) Inspect your datasets
 
@@ -287,10 +288,14 @@ ARIA labeling and training workflow. It connects raw frames from **MoldPilot** q
 sessions (imported via **MoldTrace**), partial annotation in **Label Studio**, and
 training dataset assembly in MoldVision — all in one traceable place.
 
+Use the lake as the source of truth:
+- **Do not create a new training dataset just to label one session.**
+- Import sessions into the lake, label via batches, then `lake pull` a training snapshot when you are ready to train.
+
 ```
 MoldPilot (records sessions)
         │
-        ▼ MoldTrace extracts frames
+        ▼ (either MoldTrace-extracted frames OR direct MP4 import)
 moldvision lake session import          ← registers raw frames, all unlabeled
         │
         ▼
@@ -332,6 +337,24 @@ moldvision lake session import `
   --session-meta      path\to\session.json `
   --inspection-frames path\to\frames\ `
   --monitor-frames    path\to\hmi_frames\
+
+# Directly import from a MoldPilot session folder with MP4 chunks
+# (auto-uses session.json, auto-detects component/process streams, auto-extracts frames)
+moldvision lake session import `
+  --session-dir C:\ARIA\shared\ingest\moldpilot\sessions\Hydraulic_Tesi\qual_20260417T134942Z_bf7b217d `
+  --extract-fps 0.5
+
+# Equivalent explicit form (if videos are elsewhere)
+moldvision lake session import `
+  --session-meta          path\to\session.json `
+  --inspection-videos-dir path\to\component_chunks `
+  --monitor-videos-dir    path\to\process_chunks `
+  --extract-fps           0.5
+
+# Use an exact frame budget instead of FPS (applied per stream)
+moldvision lake session import `
+  --session-dir path\to\qual_session `
+  --extract-frames 300
 
 # Import external / pre-existing images (historical data, supplier datasets, etc.)
 # Without annotations — all images marked unlabeled:
