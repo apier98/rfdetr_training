@@ -356,6 +356,9 @@ moldvision lake session import `
   --session-dir path\to\qual_session `
   --extract-frames 300
 
+# Note: when importing from videos, extracted frames are staged under
+# %LOCALAPPDATA%\ARIA\MoldVision\temp\... and cleaned up automatically.
+
 # Import external / pre-existing images (historical data, supplier datasets, etc.)
 # Without annotations — all images marked unlabeled:
 moldvision lake import `
@@ -404,8 +407,15 @@ moldvision lake label-batch create `
 
 # After annotating in Label Studio and exporting COCO JSON:
 moldvision lake label-batch commit `
-  --batch-id <batch_id> `
+  --batch <batch_id> `
   --coco-json path\to\export\_annotations.coco.json
+
+# One-command pull from Label Studio API + commit (no manual file copy)
+moldvision lake label-batch commit `
+  --batch <batch_id> `
+  --ls-url http://localhost:8080 `
+  --ls-api-token <token> `
+  --ls-project-id 12
 
 # List all batches and their status
 moldvision lake label-batch status

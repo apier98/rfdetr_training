@@ -9,9 +9,12 @@ import json
 import os
 import sys
 import tempfile
+import io
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
+from urllib import parse, request
 
 from . import appconfig
 from .coco import (
@@ -1382,7 +1385,9 @@ def _handle_lake_session_import(args) -> int:
         return 2
 
     try:
-        with tempfile.TemporaryDirectory(prefix="moldvision_lake_import_") as tmp_root:
+        temp_root = appconfig.config_dir() / "temp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="lake_import_", dir=str(temp_root)) as tmp_root:
             if inspection_videos and not insp_frames_dir:
                 insp_out = Path(tmp_root) / "inspection_frames"
                 _extract_stream(inspection_videos, "Inspection stream", insp_out)
@@ -1484,8 +1489,101 @@ def _handle_lake_label_batch_create(args) -> int:
 def _handle_lake_label_batch_commit(args) -> int:
     from .lake_label import label_batch_commit
     cfg = _lake_cfg(args)
+
+    def _download_ls_export(
+        *,
+        batch_id: str,
+        ls_url: str,
+        ls_token: str,
+        ls_project_id: int,
+        ls_export_type: str,
+    ) -> Path:
+        base_url = ls_url.rstrip("/")
+        query = parse.urlencode(
+            {
+                "exportType": ls_export_type,
+                "download_all_tasks": "true",
+                "download_resources": "false",
+            }
+        )
+        url = f"{base_url}/api/projects/{ls_project_id}/export?{query}"
+        req = request.Request(
+            url,
+            headers={
+                "Authorization": f"Token {ls_token}",
+                "Accept": "*/*",
+            },
+            method="GET",
+        )
+
+        try:
+            with request.urlopen(req, timeout=120) as resp:
+                raw = resp.read()
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+        except Exception as e:
+            raise RuntimeError(f"Label Studio export download failed from {url}: {e}") from e
+
+        export_dir = cfg.storage().abs_path(f"label_batches/{batch_id}/export")
+        export_dir.mkdir(parents=True, exist_ok=True)
+        out_json = export_dir / "_annotations.coco.from_ls.json"
+
+        if not raw:
+            raise RuntimeError("Label Studio export response was empty.")
+
+        is_zip = raw[:2] == b"PK" or "zip" in content_type
+        if is_zip:
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                    names = [n for n in zf.namelist() if n.lower().endswith(".json")]
+                    if not names:
+                        raise RuntimeError("ZIP export contains no JSON file.")
+                    preferred = [n for n in names if "_annotations" in Path(n).name.lower()]
+                    picked = preferred[0] if preferred else names[0]
+                    data = zf.read(picked)
+            except Exception as e:
+                raise RuntimeError(f"Could not parse Label Studio ZIP export: {e}") from e
+            out_json.write_bytes(data)
+        else:
+            out_json.write_bytes(raw)
+
+        return out_json
+
     coco_path = Path(args.coco_json) if args.coco_json else None
+    ls_url = getattr(args, "ls_url", None) or os.environ.get("LABEL_STUDIO_URL")
+    ls_token = getattr(args, "ls_api_token", None) or os.environ.get("LABEL_STUDIO_API_TOKEN")
+    ls_project_id = getattr(args, "ls_project_id", None)
+    if ls_project_id is None:
+        env_pid = os.environ.get("LABEL_STUDIO_PROJECT_ID")
+        if env_pid:
+            try:
+                ls_project_id = int(env_pid)
+            except ValueError:
+                print("Error: LABEL_STUDIO_PROJECT_ID must be an integer.", file=sys.stderr)
+                return 2
+
+    use_ls_pull = bool(ls_url or ls_token or ls_project_id is not None)
+    if use_ls_pull and coco_path is not None:
+        print("Error: use either --coco-json or Label Studio pull flags, not both.", file=sys.stderr)
+        return 2
+    if use_ls_pull and (not ls_url or not ls_token or ls_project_id is None):
+        print(
+            "Error: Label Studio pull requires URL, API token, and project ID. "
+            "Provide --ls-url/--ls-api-token/--ls-project-id or the LABEL_STUDIO_* env vars.",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
+        if use_ls_pull:
+            coco_path = _download_ls_export(
+                batch_id=args.batch_id,
+                ls_url=str(ls_url),
+                ls_token=str(ls_token),
+                ls_project_id=int(ls_project_id),
+                ls_export_type=str(getattr(args, "ls_export_type", "COCO") or "COCO"),
+            )
+            print(f"Downloaded Label Studio export -> {coco_path}")
+
         label_batch_commit(
             cfg,
             batch_id=args.batch_id,

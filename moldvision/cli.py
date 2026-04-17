@@ -526,6 +526,10 @@ def build_parser() -> argparse.ArgumentParser:
     lk_lbk = lk_lb_sub.add_parser("commit", help="Commit a Label Studio COCO export back into the lake")
     lk_lbk.add_argument("--batch", required=True, dest="batch_id", help="Batch ID to commit")
     lk_lbk.add_argument("--coco-json", default=None, help="Explicit path to COCO JSON (default: auto-detect in batch/export/)")
+    lk_lbk.add_argument("--ls-url", default=None, help="Label Studio base URL (e.g. http://localhost:8080)")
+    lk_lbk.add_argument("--ls-api-token", default=None, help="Label Studio API token (fallback: LABEL_STUDIO_API_TOKEN)")
+    lk_lbk.add_argument("--ls-project-id", type=int, default=None, help="Label Studio project ID (fallback: LABEL_STUDIO_PROJECT_ID)")
+    lk_lbk.add_argument("--ls-export-type", default="COCO", help="Label Studio export type (default: COCO)")
     lk_lbk.add_argument("--dry-run", action="store_true")
     lk_lbk.add_argument("--lake-root", default=None)
 
