@@ -330,21 +330,26 @@ def extract_parameter_schema(
 
 
 def check_schema_homogeneity(rows: Sequence[dict]) -> Dict[str, Any]:
-    """Check whether all rows share the same feature schema.
+    """Check whether all rows share the same HMI schema.
 
     Returns a dict with ``homogeneous`` (bool), ``n_schemas``, and per-layout
     details.  Mirrors the ``schema_homogeneous`` logic in MoldTrace's
     ``export_training_rows`` summary.
     """
-    seen_sets: dict[frozenset[str], int] = {}
+    seen_sets: dict[tuple, int] = {}
     layouts: List[dict] = []
     for row in rows:
         ctx = row.get("context") or {}
-        fk = ctx.get("feature_keys")
-        if isinstance(fk, list):
-            fs = frozenset(fk)
+        layout_id = str(ctx.get("hmi_layout_id") or "").strip()
+        machine_family = str(ctx.get("machine_family") or "").strip()
+        if layout_id or machine_family:
+            fs = ("layout", layout_id or None, machine_family or None)
         else:
-            fs = frozenset((row.get("features") or {}).keys())
+            fk = ctx.get("feature_keys")
+            if isinstance(fk, list):
+                fs = ("feature-set", frozenset(str(key) for key in fk))
+            else:
+                fs = ("feature-set", frozenset((row.get("features") or {}).keys()))
         seen_sets[fs] = seen_sets.get(fs, 0) + 1
         layout_entry = {
             "hmi_layout_id": ctx.get("hmi_layout_id"),
@@ -356,7 +361,7 @@ def check_schema_homogeneity(rows: Sequence[dict]) -> Dict[str, Any]:
         "homogeneous": len(seen_sets) <= 1,
         "n_schemas": len(seen_sets),
         "rows_per_schema": dict(
-            (str(sorted(fs))[:80], cnt) for fs, cnt in seen_sets.items()
+            (repr(fs)[:80], cnt) for fs, cnt in seen_sets.items()
         ),
         "hmi_layouts_seen": layouts,
     }

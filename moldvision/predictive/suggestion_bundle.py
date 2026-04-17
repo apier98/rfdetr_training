@@ -144,12 +144,14 @@ def write_suggestion_bundle(
             "std": round(r.cv_metric_std, 6),
             "n_train": r.n_train,
             "n_eval": r.n_eval,
+            "used_feature_keys": list(r.used_feature_keys),
         }
         for name, r in train_result.targets.items()
     }
     training_meta = {
         "n_eligible_rows": train_result.n_eligible_rows,
         "n_features": len(train_result.feature_keys),
+        "selected_feature_keys": list(train_result.feature_keys),
         "null_strategy": train_result.null_strategy,
         "selected_feature_stats": list(train_result.config.selected_feature_stats),
         "cv_metrics": cv_metrics,

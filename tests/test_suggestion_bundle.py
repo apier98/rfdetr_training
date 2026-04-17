@@ -165,6 +165,8 @@ class TestWriteSuggestionBundle(unittest.TestCase):
             self.assertEqual(meta["null_strategy"], "native_missing")
             self.assertEqual(meta["selected_feature_stats"], ["setpoint_end", "present"])
             self.assertIn("min_feature_presence_ratio", meta["lgbm_config"])
+            self.assertEqual(meta["selected_feature_keys"], result.feature_keys)
+            self.assertIn("used_feature_keys", meta["cv_metrics"]["quality_score"])
 
     def test_manifest_records_selected_feature_stats(self) -> None:
         from moldvision.predictive.suggestion_bundle import write_suggestion_bundle

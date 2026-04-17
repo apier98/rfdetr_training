@@ -307,6 +307,24 @@ class TestSchemaHomogeneity(unittest.TestCase):
         self.assertTrue(result["homogeneous"])
         self.assertEqual(result["n_schemas"], 1)
 
+    def test_same_layout_with_different_active_slots_is_still_homogeneous(self) -> None:
+        row1 = _make_row(feature_keys=["a.setpoint_end", "a.present"], features={"a.setpoint_end": 1.0, "a.present": 1.0})
+        row2 = _make_row(
+            session_id="sess_002",
+            feature_keys=["a.setpoint_end", "a.present", "b.setpoint_end", "b.present"],
+            features={
+                "a.setpoint_end": 1.0,
+                "a.present": 1.0,
+                "b.setpoint_end": 2.0,
+                "b.present": 1.0,
+            },
+        )
+
+        result = check_schema_homogeneity([row1, row2])
+
+        self.assertTrue(result["homogeneous"])
+        self.assertEqual(result["n_schemas"], 1)
+
     def test_heterogeneous(self) -> None:
         row1 = _make_row()
         row2 = _make_row(

@@ -1940,6 +1940,16 @@ def _handle_predictive_train(args) -> int:
     for name, tr in result.targets.items():
         print(f"  {name:<{col_w}}  {tr.cv_metric_name:<12} {tr.cv_metric_value:7.4f}  ±{tr.cv_metric_std:.4f}")
 
+    print(f"\nSelected features after constant pruning ({len(result.feature_keys)}):")
+    for key in result.feature_keys:
+        print(f"  - {key}")
+
+    print("\nUsed LightGBM features:")
+    for name, tr in result.targets.items():
+        print(f"  {name}:")
+        for key in getattr(tr, "used_feature_keys", result.feature_keys):
+            print(f"    - {key}")
+
     # Persist training result.
     output_dir.mkdir(parents=True, exist_ok=True)
     pkl_path = output_dir / "train_result.pkl"
