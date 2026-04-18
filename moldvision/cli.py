@@ -457,7 +457,7 @@ def build_parser() -> argparse.ArgumentParser:
     lk_ext.add_argument("--lake-root", default=None)
 
     # lake session
-    lk_sess = lk_sub.add_parser("session", help="Session-level commands (import, list)")
+    lk_sess = lk_sub.add_parser("session", help="Session-level commands (import, list, remove)")
     lk_sess_sub = lk_sess.add_subparsers(dest="lake_session_cmd", required=True)
 
     lk_imp = lk_sess_sub.add_parser("import", help="Import a qual session into the lake (from extracted frames or directly from videos)")
@@ -497,6 +497,11 @@ def build_parser() -> argparse.ArgumentParser:
     lk_mbg.add_argument("--task", choices=["detect", "seg"], required=True)
     lk_mbg.add_argument("--dry-run", action="store_true", help="Preview without modifying the index")
     lk_mbg.add_argument("--lake-root", default=None)
+
+    lk_rm = lk_sess_sub.add_parser("remove", help="Remove a session from the lake (files + index entries)")
+    lk_rm.add_argument("--session", required=True, help="Session ID to remove")
+    lk_rm.add_argument("--dry-run", action="store_true", help="Preview what would be removed")
+    lk_rm.add_argument("--lake-root", default=None)
 
     # lake label-batch
     lk_lb = lk_sub.add_parser("label-batch", help="Labeling batch commands (create, commit, status)")

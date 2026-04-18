@@ -26,7 +26,7 @@ if you want to skip the ML-assisted path.
    │                       │                                 │
    │           export COCO JSON                              │
    │                       │                                 │
-   │   moldvision dataset ingest ──► next training run       │
+   │   lake label-batch commit ──► lake pull ──► next run    │
    │                                                         │
    └─────────────────────────────────────────────────────────┘
 ```
@@ -119,31 +119,30 @@ Label Studio runs at `http://localhost:8080`. Create an account on first launch.
 <View>
   <Image name="image" value="$image"/>
   <RectangleLabels name="label" toName="image">
-    <Label value="scratch" background="#FF0000" category="0"/>
-    <Label value="dent"    background="#00FF00" category="1"/>
-    <Label value="stain"   background="#0000FF" category="2"/>
+    <Label value="Component_Base" background="#4CAF50" category="0"/>
+    <Label value="Weld_Line"      background="#FF9800" category="1"/>
+    <Label value="Sink_Mark"      background="#F44336" category="2"/>
+    <Label value="Flash"          background="#03A9F4" category="3"/>
+    <Label value="Burn_Mark"      background="#9C27B0" category="4"/>
   </RectangleLabels>
 </View>
 ```
 
-### Seg label config (detect + polygon masks)
+### Seg label config (monitor segmentation, single class)
 
 ```xml
 <View>
   <Image name="image" value="$image"/>
   <RectangleLabels name="label" toName="image">
-    <Label value="scratch" category="0"/>
-    <Label value="dent"    category="1"/>
+    <Label value="HMI_Screen" category="0"/>
   </RectangleLabels>
   <PolygonLabels name="mask" toName="image">
-    <Label value="scratch" category="0"/>
-    <Label value="dent"    category="1"/>
+    <Label value="HMI_Screen" category="0"/>
   </PolygonLabels>
 </View>
 ```
 
-Replace label names with your actual class names. They **must match** the class
-names used when training the model.
+These labels must match your training classes exactly.
 
 > ⚠️ **Label Studio YOLO export sorts class IDs alphabetically by label name**,
 > regardless of the order labels appear in the UI.  For example, classes
@@ -216,20 +215,24 @@ noisy. Re-start the backend with `--with score_threshold=0.7`.
 
 ---
 
-## Step 10 — Ingest into MoldVision and retrain
+## Step 10 — Commit Batch To Lake, Pull Dataset, Retrain
 
 ```powershell
-# Place your exported images + COCO JSON in the labels_inbox
-# Expected layout:
-#   datasets/<UUID>/labels_inbox/<split>/images/<image_files>
-#   datasets/<UUID>/labels_inbox/<split>/_annotations.coco.json
+# Commit Label Studio export back into the open lake batch
+moldvision lake label-batch commit `
+  --batch <batch_id> `
+  --coco-json C:\path\to\result.json
 
-moldvision dataset ingest -d datasets/<UUID>
+# Build a training dataset snapshot from the lake
+moldvision lake pull `
+  --task detect `
+  --train-ratio 0.8 `
+  --max-per-session 300 `
+  --balance-classes
 
-# Validate the result
+# Validate and retrain
 moldvision dataset validate -d datasets/<UUID> --task detect
 
-# Retrain
 moldvision train `
   --dataset-dir datasets/<UUID> `
   --epochs 80 `
@@ -238,6 +241,9 @@ moldvision train `
 
 After retraining, create a new bundle and restart the ML backend with the
 updated weights. The next labeling cycle will benefit from the improved model.
+
+If you are not using the lake workflow, you can still use the legacy
+`labels_inbox` + `moldvision dataset ingest` path.
 
 ---
 
@@ -322,31 +328,30 @@ Bounding box detection:
 <View>
   <Image name="image" value="$image"/>
   <RectangleLabels name="label" toName="image">
-    <Label value="scratch" background="#FF0000" category="0"/>
-    <Label value="dent"    background="#00FF00" category="1"/>
-    <Label value="stain"   background="#0000FF" category="2"/>
+    <Label value="Component_Base" background="#4CAF50" category="0"/>
+    <Label value="Weld_Line"      background="#FF9800" category="1"/>
+    <Label value="Sink_Mark"      background="#F44336" category="2"/>
+    <Label value="Flash"          background="#03A9F4" category="3"/>
+    <Label value="Burn_Mark"      background="#9C27B0" category="4"/>
   </RectangleLabels>
 </View>
 ```
 
-Instance segmentation (bounding boxes + polygon masks):
+Monitor segmentation (single class, bounding boxes + polygon masks):
 
 ```xml
 <View>
   <Image name="image" value="$image"/>
   <RectangleLabels name="label" toName="image">
-    <Label value="scratch" category="0"/>
-    <Label value="dent"    category="1"/>
+    <Label value="HMI_Screen" category="0"/>
   </RectangleLabels>
   <PolygonLabels name="mask" toName="image">
-    <Label value="scratch" category="0"/>
-    <Label value="dent"    category="1"/>
+    <Label value="HMI_Screen" category="0"/>
   </PolygonLabels>
 </View>
 ```
 
-Replace label names with your actual class names — they must match what you
-pass to `moldvision dataset create -c`.
+These labels must match what you use in the corresponding training dataset.
 
 > ⚠️ **Always add `category="N"` to every `<Label>` tag** to prevent silent
 > class ID swaps.  Without it, Label Studio assigns YOLO class IDs
@@ -364,6 +369,18 @@ Go to **Export** → **COCO JSON** → download and extract the `.zip`. You will
 get a `result.json` and an `images/` folder.
 
 **5. Ingest into MoldVision**
+
+Lake workflow (recommended):
+
+```powershell
+moldvision lake label-batch commit `
+  --batch <batch_id> `
+  --coco-json C:\path\to\result.json
+
+moldvision lake pull --task detect
+```
+
+Legacy non-lake workflow:
 
 ```powershell
 # Copy the exported files into labels_inbox
@@ -419,9 +436,9 @@ Tools such as **CVAT**, **VGG Image Annotator (VIA)**, or **Roboflow** can
 export COCO JSON directly. The ingest pipeline accepts any valid COCO JSON file.
 
 1. Annotate in your preferred tool.
-2. Export as **COCO JSON** (with an `images/` folder alongside the `.json`).
-3. Drop everything into `datasets/<UUID>/labels_inbox/coco/`.
-4. Run `moldvision dataset ingest -d datasets/<UUID>`.
+2. Export as **COCO JSON**.
+3. If using lake batches, run `moldvision lake label-batch commit --batch <batch_id> --coco-json <json>`.
+4. Otherwise (legacy), drop everything into `datasets/<UUID>/labels_inbox/coco/` and run `moldvision dataset ingest -d datasets/<UUID>`.
 
 ---
 

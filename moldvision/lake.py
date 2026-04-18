@@ -103,7 +103,10 @@ class LakeConfig:
             except Exception:
                 data = {}
             return LakeConfig(
-                root=Path(data.get("root", str(root))),
+                # Always trust the discovered/selected location for the active lake root.
+                # This prevents stale `root` values in data_lake_config.json from silently
+                # redirecting commands to another lake.
+                root=Path(root),
                 storage_backend=data.get("storage_backend", "local"),
                 extra={k: v for k, v in data.items() if k not in ("root", "storage_backend")},
             )
@@ -329,7 +332,9 @@ def _make_index_record(
 class SessionImportResult:
     session_id: str
     inspection_frames_added: int
+    inspection_frames_overwritten: int
     monitor_frames_added: int
+    monitor_frames_overwritten: int
     already_existed: bool
 
 
@@ -368,34 +373,40 @@ def session_import(
     existing_paths = {r["rel_path"] for r in load_index(cfg.root)}
     new_records: List[Dict[str, Any]] = []
 
-    def _import_frames(src_dir: Path, frame_type: str) -> int:
+    def _import_frames(src_dir: Path, frame_type: str) -> tuple[int, int]:
         subdir = "inspection_frames" if frame_type == "inspection" else "monitor_frames"
-        count = 0
+        added = 0
+        overwritten = 0
         frames = sorted(p for p in src_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
         for idx, frame_path in enumerate(frames):
             rel = f"{session_rel}/{subdir}/{frame_path.name}"
             if rel not in existing_paths:
                 storage.copy_in(frame_path, rel, overwrite=overwrite)
                 new_records.append(_make_index_record(rel, meta, frame_type, idx))
-                count += 1
+                added += 1
             elif overwrite:
                 storage.copy_in(frame_path, rel, overwrite=True)
-        return count
+                overwritten += 1
+        return added, overwritten
 
-    insp_count = 0
-    mon_count = 0
+    insp_added = 0
+    insp_overwritten = 0
+    mon_added = 0
+    mon_overwritten = 0
 
     if inspection_frames_dir and inspection_frames_dir.exists():
-        insp_count = _import_frames(inspection_frames_dir, "inspection")
+        insp_added, insp_overwritten = _import_frames(inspection_frames_dir, "inspection")
     if monitor_frames_dir and monitor_frames_dir.exists():
-        mon_count = _import_frames(monitor_frames_dir, "monitor")
+        mon_added, mon_overwritten = _import_frames(monitor_frames_dir, "monitor")
 
     append_index_records(cfg.root, new_records)
 
     return SessionImportResult(
         session_id=session_id,
-        inspection_frames_added=insp_count,
-        monitor_frames_added=mon_count,
+        inspection_frames_added=insp_added,
+        inspection_frames_overwritten=insp_overwritten,
+        monitor_frames_added=mon_added,
+        monitor_frames_overwritten=mon_overwritten,
         already_existed=already_existed,
     )
 
@@ -764,3 +775,42 @@ def session_list(
     print("─" * len(header))
     print(f"{len(matching)} session(s) matched.")
     return matching
+
+
+@dataclass
+class SessionRemoveResult:
+    session_id: str
+    session_dir: Path
+    files_in_session: int
+    index_records_removed: int
+    dry_run: bool
+
+
+def session_remove(cfg: LakeConfig, *, session_id: str, dry_run: bool = False) -> SessionRemoveResult:
+    """Remove one session directory and its index rows from the lake."""
+    sid = session_id.strip()
+    if not sid:
+        raise ValueError("session_id must be non-empty")
+
+    session_dir = cfg.root / "sessions" / sid
+    records = load_index(cfg.root)
+    kept = [r for r in records if r.get("session_id") != sid]
+    removed = len(records) - len(kept)
+
+    if not session_dir.exists() and removed == 0:
+        raise FileNotFoundError(f"Session not found: {session_dir}")
+
+    files_in_session = sum(1 for p in session_dir.rglob("*") if p.is_file()) if session_dir.exists() else 0
+
+    if not dry_run:
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+        save_index(cfg.root, kept)
+
+    return SessionRemoveResult(
+        session_id=sid,
+        session_dir=session_dir,
+        files_in_session=files_in_session,
+        index_records_removed=removed,
+        dry_run=dry_run,
+    )

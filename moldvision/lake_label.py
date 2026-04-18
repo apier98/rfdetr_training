@@ -396,6 +396,23 @@ def label_batch_commit(
     # Build frame filename → rel_path map from batch metadata
     fname_to_rel: Dict[str, str] = {Path(rp).name: rp for rp in batch_frames}
 
+    def _candidate_export_names(raw_file_name: str) -> List[str]:
+        """Return possible filenames that may map an export image to batch frames.
+
+        Label Studio COCO exports may store file_name like:
+          ../../label-studio/media/upload/14/3efaed63-my_image.jpg
+        while our batch stores:
+          my_image.jpg
+        """
+        base = Path(raw_file_name).name
+        out = [base]
+        if "-" in base:
+            prefix, rest = base.split("-", 1)
+            # Common Label Studio upload prefix is 8 hex chars.
+            if len(prefix) == 8 and all(c in "0123456789abcdefABCDEF" for c in prefix):
+                out.append(rest)
+        return out
+
     # Find and parse COCO export
     coco_path = _find_export_coco(batch_abs, coco_json_path)
     coco = _parse_coco(coco_path)
@@ -414,8 +431,11 @@ def label_batch_commit(
     skipped_count = 0
 
     for im in export_images:
-        fname = Path(im.get("file_name", "")).name
-        rel_path = fname_to_rel.get(fname)
+        rel_path = None
+        for candidate in _candidate_export_names(im.get("file_name", "")):
+            rel_path = fname_to_rel.get(candidate)
+            if rel_path:
+                break
         if not rel_path:
             skipped_count += 1
             continue

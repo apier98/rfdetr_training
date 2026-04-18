@@ -57,6 +57,29 @@ pip install "aria-moldvision[label-studio]"
 
 MoldVision stores persistent defaults in `%LOCALAPPDATA%\ARIA\MoldVision\config.json` (Windows) or the appropriate platform config directory. When `ARIA_SHARED_ROOT` is set, the lake defaults to `shared\lake`, shared predictive export discovery reads from `shared\ingest\moldtrace\training_rows\v1`, and `moldvision publish` targets the shared `published\...` tree automatically.
 
+### Shared storage setup (recommended in full ARIA stack)
+
+```powershell
+# Root shared folder used by MoldPilot/MoldTrace/MoldVision
+$env:ARIA_SHARED_ROOT = "C:\Users\andrea\ARIA\shared"
+
+# Optional explicit lake override (otherwise defaults to %ARIA_SHARED_ROOT%\lake)
+$env:ARIA_DATA_LAKE = "$env:ARIA_SHARED_ROOT\lake"
+
+# Optional: persist on Windows for future terminals
+setx ARIA_SHARED_ROOT "C:\Users\andrea\ARIA\shared"
+setx ARIA_DATA_LAKE   "C:\Users\andrea\ARIA\shared\lake"
+```
+
+Important:
+- PowerShell variables like `$data_lake` are not used by MoldVision unless exported as environment variables (`$env:ARIA_DATA_LAKE`).
+- To avoid accidental dual-lake usage, set `ARIA_DATA_LAKE` explicitly to `shared\lake`.
+
+With this setup:
+- MoldPilot writes qualification sessions to `shared\ingest\moldpilot\sessions\...`
+- MoldTrace writes predictive training exports to `shared\ingest\moldtrace\training_rows\v1\...`
+- MoldVision uses `shared\lake\...` as its lake root and publishes to `shared\published\...`
+
 ```powershell
 moldvision config show                          # print all current settings
 moldvision config set dataset-root D:\datasets  # default root for dataset create/list
@@ -292,6 +315,11 @@ Use the lake as the source of truth:
 - **Do not create a new training dataset just to label one session.**
 - Import sessions into the lake, label via batches, then `lake pull` a training snapshot when you are ready to train.
 
+Data roles inside the lake:
+- `sessions/<session_id>/...` is the canonical raw-frame store and traceability anchor.
+- `label_batches/<batch_id>/...` is a temporary annotation work package (selected copy of frames for labeling).
+- After `label-batch commit`, annotations are merged back into session-level annotation files; frames do not move from batch to session.
+
 ```
 MoldPilot (records sessions)
         │
@@ -382,6 +410,10 @@ moldvision lake session list              # all sessions + coverage summary
 moldvision lake session list --mold-id X  # filter by mold
 moldvision lake session list --task seg   # only sessions with monitor frames
 
+# Remove a broken/incorrect session import (files + index rows)
+moldvision lake session remove --session qual_20260417T134942Z_bf7b217d --dry-run
+moldvision lake session remove --session qual_20260417T134942Z_bf7b217d
+
 # If some unlabeled frames in a session are confirmed negatives (no defects),
 # mark them as background so coverage shows 100% and they are excluded from
 # future label batches.
@@ -394,7 +426,7 @@ moldvision lake session mark-bg --session collaudo_marco --task detect --dry-run
 moldvision lake label-batch create `
   --task           detect `
   --n              200 `
-  --mode           temporal `
+  --sample-mode    temporal `
   --min-frame-gap  5 `
   --seed           42
 
@@ -402,8 +434,8 @@ moldvision lake label-batch create `
 moldvision lake label-batch create `
   --task     detect `
   --n        100 `
-  --mode     temporal `
-  --sessions trials_from_wittmann another_session_id
+  --sample-mode temporal `
+  --sessions "trials_from_wittmann,another_session_id"
 
 # After annotating in Label Studio and exporting COCO JSON:
 moldvision lake label-batch commit `

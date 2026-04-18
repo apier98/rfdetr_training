@@ -1178,6 +1178,8 @@ def handle_lake(args) -> int:
             return _handle_lake_session_list(args)
         if sub == "mark-bg":
             return _handle_lake_session_mark_bg(args)
+        if sub == "remove":
+            return _handle_lake_session_remove(args)
 
     if lake_cmd == "label-batch":
         sub = getattr(args, "lake_label_batch_cmd", None)
@@ -1406,8 +1408,14 @@ def _handle_lake_session_import(args) -> int:
             )
         verb = "Updated" if result.already_existed else "Imported"
         print(f"{verb} session: {result.session_id}")
-        print(f"  Inspection frames: {result.inspection_frames_added}")
-        print(f"  Monitor frames:    {result.monitor_frames_added}")
+        print(
+            f"  Inspection frames: {result.inspection_frames_added}"
+            f" (overwritten: {result.inspection_frames_overwritten})"
+        )
+        print(
+            f"  Monitor frames:    {result.monitor_frames_added}"
+            f" (overwritten: {result.monitor_frames_overwritten})"
+        )
         return 0
     except FileExistsError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1452,6 +1460,27 @@ def _handle_lake_session_mark_bg(args) -> int:
             task=args.task,
             dry_run=bool(getattr(args, "dry_run", False)),
         )
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+
+def _handle_lake_session_remove(args) -> int:
+    from .lake import session_remove
+    cfg = _lake_cfg(args)
+    try:
+        result = session_remove(
+            cfg,
+            session_id=args.session,
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
+        prefix = "[DRY RUN] " if result.dry_run else ""
+        print(f"{prefix}Removed session: {result.session_id}")
+        print(f"  Lake root:            {cfg.root}")
+        print(f"  Session folder:       {result.session_dir}")
+        print(f"  Files in session:     {result.files_in_session}")
+        print(f"  Index rows removed:   {result.index_records_removed}")
         return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
