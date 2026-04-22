@@ -398,6 +398,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable inference_mode patch (if auto-enabled)",
     )
     tr.add_argument("--no-validate", action="store_true", help="Skip dataset validation checks")
+    tr.add_argument(
+        "--portable-only",
+        action="store_true",
+        help="After writing checkpoint_portable.pth, remove all other checkpoint*.pth files to save disk space",
+    )
     tr.add_argument("--log-file", default=None, help="Write training output to this log file (default: auto → <output_dir>/training.log)")
     tr.add_argument("--no-log-file", action="store_true", help="Disable file logging (console only)")
 

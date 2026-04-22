@@ -128,6 +128,7 @@ class TrainConfig:
     do_random_resize_via_padding: Optional[bool]
     aug_config: Optional[Dict[str, Any]]
     no_aug: bool
+    portable_only: bool
     # File logging (fields with defaults must come last)
     log_file: Optional[str] = None  # explicit path; None = auto (output_dir/training.log)
     no_log_file: bool = False  # if True, disable file logging entirely
@@ -149,6 +150,7 @@ def _summarize_training_outputs(out_dir: Path) -> None:
         return
 
     candidates = [
+        "checkpoint_portable.pth",
         "checkpoint_best_total.pth",
         "checkpoint_best_regular.pth",
         "checkpoint_best_ema.pth",
@@ -331,19 +333,30 @@ def _try_write_portable_checkpoint(out_dir: Path, *, checkpoint_key: Optional[st
         print(f"Warning: could not write portable checkpoint ({dst}): {e}", file=sys.stderr)
 
 
-def _cleanup_redundant_checkpoints(out_dir: Path) -> None:
-    """Remove sub-metric checkpoints that are superseded once checkpoint_portable.pth exists.
+def _cleanup_redundant_checkpoints(out_dir: Path, *, portable_only: bool = False) -> None:
+    """Remove checkpoints that are superseded once checkpoint_portable.pth exists.
 
-    RF-DETR writes checkpoint_best_ema.pth and checkpoint_best_regular.pth as
-    per-metric trackers during training.  After checkpoint_best_total.pth is
-    produced (the winner of those two) and checkpoint_portable.pth is extracted
-    from it, the sub-metric files add no further value while consuming several
-    hundred MB each.
+    Default mode removes only sub-metric trackers that are superseded by
+    checkpoint_best_total.pth.
+
+    Portable-only mode removes all non-portable checkpoint*.pth artifacts
+    once checkpoint_portable.pth exists.
 
     This function is a no-op when checkpoint_portable.pth is absent (i.e. the
     portable write failed), so the originals are always preserved on error.
     """
     if not (out_dir / "checkpoint_portable.pth").exists():
+        return
+
+    if portable_only:
+        for p in sorted(out_dir.glob("checkpoint*.pth")):
+            if p.name == "checkpoint_portable.pth":
+                continue
+            try:
+                p.unlink()
+                print(f"Removed checkpoint (portable-only): {p.name}")
+            except Exception as exc:
+                print(f"Warning: could not remove {p.name}: {exc}", file=sys.stderr)
         return
 
     for name in ("checkpoint_best_ema.pth", "checkpoint_best_regular.pth"):
@@ -686,6 +699,6 @@ def train(cfg: TrainConfig) -> int:
         print(f"Training finished. Outputs in: {out_dir}")
         _write_deployment_bundle(out_dir, dataset_dir, cfg, md)
         _try_write_portable_checkpoint(out_dir, checkpoint_key=cfg.checkpoint_key)
-        _cleanup_redundant_checkpoints(out_dir)
+        _cleanup_redundant_checkpoints(out_dir, portable_only=bool(cfg.portable_only))
         _summarize_training_outputs(out_dir)
         return 0

@@ -220,6 +220,7 @@ Common training options:
 - Start a new run from existing weights: `--finetune-from path\to\checkpoint.pth`
 - Continue an existing run: `--resume path\to\checkpoint.pth`
 - Evaluation only (no training): `--eval-only`
+- Save disk space after training: `--portable-only` (keeps `checkpoint_portable.pth`, removes other `checkpoint*.pth` files only after portable extraction succeeds)
 
 ## Predictive training (Startup Assistant)
 
@@ -523,7 +524,7 @@ The default export format is set by `moldvision config set export-format <fmt>`.
 
 ```powershell
 # ONNX (auto-detects task and size from model_config.json)
-moldvision export -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_best_total.pth --format onnx
+moldvision export -d datasets/<UUID> -w datasets/<UUID>/models/checkpoint_portable.pth --format onnx
 
 # FP16 — ~2x speedup on modern GPUs, no calibration needed
 moldvision export -d datasets/<UUID> -w ... --format onnx_fp16
@@ -536,6 +537,8 @@ moldvision export -d datasets/<UUID> -w ... --format onnx_quantized
 # TensorRT engine (requires trtexec on PATH)
 moldvision export -d datasets/<UUID> -w ... --format tensorrt --fp16
 ```
+
+If your training run used `--portable-only`, use `checkpoint_portable.pth` for export/bundle commands.
 
 > Tip: export is `--strict` by default (fails fast on mismatched checkpoints). Use `--non-strict` only for debugging.
 

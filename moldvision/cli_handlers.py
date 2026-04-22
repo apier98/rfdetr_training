@@ -759,6 +759,7 @@ def handle_train(args) -> int:
             do_random_resize_via_padding=getattr(args, "do_random_resize_via_padding", None),
             aug_config=aug_cfg,
             no_aug=bool(getattr(args, "no_aug", False)),
+            portable_only=bool(getattr(args, "portable_only", False)),
             log_file=getattr(args, "log_file", None),
             no_log_file=bool(getattr(args, "no_log_file", False)),
         )
