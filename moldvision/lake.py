@@ -515,7 +515,9 @@ def external_import(
             raise ValueError(f"Could not parse COCO JSON at {coco_json}: {e}") from e
 
     # Copy images
-    existing_paths = {r["rel_path"] for r in load_index(cfg.root)}
+    existing_records = load_index(cfg.root)
+    existing_by_rel = {r["rel_path"]: r for r in existing_records if r.get("rel_path")}
+    existing_paths = set(existing_by_rel.keys())
     new_records: List[Dict[str, Any]] = []
     meta_fields = _meta_from_manifest(manifest)
 
@@ -524,25 +526,39 @@ def external_import(
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
     images_labeled = images_unlabeled = 0
+    existing_updated = False
 
     ann_task_dir = "detect" if task == "detect" else "seg"
+    status_field = "detect_status" if task == "detect" else "seg_status"
+    batch_field = "detect_batch_id" if task == "detect" else "seg_batch_id"
 
     for idx, frame_path in enumerate(frames):
         rel = f"{session_rel}/{subdir}/{frame_path.name}"
         if rel not in existing_paths or overwrite:
             storage.copy_in(frame_path, rel, overwrite=overwrite)
 
+        is_labeled = bool(annotated_fnames) and frame_path.name in annotated_fnames
+        new_status = LABEL_STATUS_LABELED if is_labeled else LABEL_STATUS_UNLABELED
+        if is_labeled:
+            images_labeled += 1
+        else:
+            images_unlabeled += 1
+
         if rel not in existing_paths:
             rec = _make_index_record(rel, meta_fields, frame_type, idx)
-            # If this image has annotations, mark it labeled immediately
-            is_labeled = bool(annotated_fnames) and frame_path.name in annotated_fnames
-            if is_labeled:
-                status_field = "detect_status" if task == "detect" else "seg_status"
-                rec[status_field] = LABEL_STATUS_LABELED
-                images_labeled += 1
-            else:
-                images_unlabeled += 1
+            rec[status_field] = new_status
+            rec[batch_field] = None
             new_records.append(rec)
+        elif overwrite:
+            rec = existing_by_rel[rel]
+            rec.update(meta_fields)
+            rec["frame_type"] = frame_type
+            rec[status_field] = new_status
+            rec[batch_field] = None
+            existing_updated = True
+
+    if existing_updated:
+        save_index(cfg.root, existing_records)
 
     append_index_records(cfg.root, new_records)
 
@@ -631,10 +647,7 @@ def index_stats(cfg: LakeConfig, task: Optional[str] = None) -> None:
     machine_w = max(8, min(20, max((len(by_session[sid][0].get('machine_id','') or '') for sid in by_session), default=8)))
     mold_w = max(8, min(24, max((len(by_session[sid][0].get('mold_id','') or '') for sid in by_session), default=8)))
 
-    header = f"{'session_id':<{sid_w}} {'machine':<{machine_w}} {'mold':<{mold_w}} {'raw':>6} {'detect':>8} {'seg':>6} {'coverage':>10}"
-    print(header)
-    print("─" * len(header))
-
+    rows: List[tuple[str, str, str, int, str, str, str]] = []
     total_raw = total_detect = total_seg = 0
     for sid in sorted(by_session):
         recs = by_session[sid]
@@ -666,13 +679,31 @@ def index_stats(cfg: LakeConfig, task: Optional[str] = None) -> None:
         seg_str = str(seg_labeled) if mon else "—"
         if seg_bg:
             seg_str = f"{seg_labeled}+{seg_bg}bg"
-        print(f"{sid:<{sid_w}} {machine:<{machine_w}} {mold:<{mold_w}} {len(insp) + len(mon):>6} {det_str:>8} {seg_str:>6} {coverage_pct:>10}")
-        total_raw += len(insp) + len(mon)
+        raw_total = len(insp) + len(mon)
+        rows.append((sid, machine, mold, raw_total, det_str, seg_str, coverage_pct))
+        total_raw += raw_total
         total_detect += detect_labeled
         total_seg += seg_labeled
 
+    det_w = max(8, max((len(r[4]) for r in rows), default=0), len("detect"))
+    seg_w = max(6, max((len(r[5]) for r in rows), default=0), len("seg"))
+    header = (
+        f"{'session_id':<{sid_w}} {'machine':<{machine_w}} {'mold':<{mold_w}} "
+        f"{'raw':>6} {'detect':>{det_w}} {'seg':>{seg_w}} {'coverage':>10}"
+    )
+    print(header)
     print("─" * len(header))
-    print(f"{'TOTAL':<{sid_w}} {'':<{machine_w}} {'':<{mold_w}} {total_raw:>6} {total_detect:>8} {total_seg:>6}")
+    for sid, machine, mold, raw_total, det_str, seg_str, coverage_pct in rows:
+        print(
+            f"{sid:<{sid_w}} {machine:<{machine_w}} {mold:<{mold_w}} "
+            f"{raw_total:>6} {det_str:>{det_w}} {seg_str:>{seg_w}} {coverage_pct:>10}"
+        )
+
+    print("─" * len(header))
+    print(
+        f"{'TOTAL':<{sid_w}} {'':<{machine_w}} {'':<{mold_w}} "
+        f"{total_raw:>6} {total_detect:>{det_w}} {total_seg:>{seg_w}}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -710,10 +741,7 @@ def session_list(
     machine_w = max(8, min(20, max((len(by_session[sid][0].get('machine_id','') or '') for sid in by_session), default=8)))
     mold_w = max(8, min(24, max((len(by_session[sid][0].get('mold_id','') or '') for sid in by_session), default=8)))
 
-    header = f"{'session_id':<{sid_w}} {'machine':<{machine_w}} {'mold':<{mold_w}} {'raw':>6} {'detect':>8} {'seg':>6} {'coverage':>10}"
-    print(header)
-    print("─" * len(header))
-
+    rows: List[tuple[str, str, str, int, str, str, str]] = []
     for sid in sorted(by_session):
         recs = by_session[sid]
         first = recs[0]
@@ -768,9 +796,32 @@ def session_list(
         seg_str = str(seg_labeled) if mon else "—"
         if seg_bg:
             seg_str = f"{seg_labeled}+{seg_bg}bg"
-        print(f"{sid:<{sid_w}} {first.get('machine_id',''):<{machine_w}} {first.get('mold_id',''):<{mold_w}} "
-              f"{total_raw:>6} {det_str:>8} {seg_str:>6} {coverage_pct:>10}")
+        rows.append(
+            (
+                sid,
+                first.get("machine_id", ""),
+                first.get("mold_id", ""),
+                total_raw,
+                det_str,
+                seg_str,
+                coverage_pct,
+            )
+        )
         matching.append(sid)
+
+    det_w = max(8, max((len(r[4]) for r in rows), default=0), len("detect"))
+    seg_w = max(6, max((len(r[5]) for r in rows), default=0), len("seg"))
+    header = (
+        f"{'session_id':<{sid_w}} {'machine':<{machine_w}} {'mold':<{mold_w}} "
+        f"{'raw':>6} {'detect':>{det_w}} {'seg':>{seg_w}} {'coverage':>10}"
+    )
+    print(header)
+    print("─" * len(header))
+    for sid, machine, mold, raw_total, det_str, seg_str, coverage_pct in rows:
+        print(
+            f"{sid:<{sid_w}} {machine:<{machine_w}} {mold:<{mold_w}} "
+            f"{raw_total:>6} {det_str:>{det_w}} {seg_str:>{seg_w}} {coverage_pct:>10}"
+        )
 
     print("─" * len(header))
     print(f"{len(matching)} session(s) matched.")

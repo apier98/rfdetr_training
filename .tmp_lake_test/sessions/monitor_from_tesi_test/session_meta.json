@@ -1,0 +1,16 @@
+{
+  "session_id": "monitor_from_tesi_test",
+  "source": "external",
+  "name": "Monitor From Tesi Test",
+  "machine_id": "",
+  "mold_id": "",
+  "part_id": "",
+  "operator_name": "",
+  "batch_number": "",
+  "started_at": "2026-04-21T20:23:20.756991Z",
+  "ended_at": "",
+  "status": "completed",
+  "markers": [],
+  "video_chunks": [],
+  "notes": ""
+}
