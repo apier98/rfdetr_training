@@ -386,7 +386,7 @@ class TestGbtTrainer(unittest.TestCase):
             [],
         )
 
-    def test_atomic_control_family_not_marked_deployable_when_member_is_pruned(self) -> None:
+    def test_atomic_control_family_becomes_partially_controllable_when_safe_subset_survives(self) -> None:
         from moldvision.predictive.trainer import GbtTrainingConfig, train_suggestion_models
 
         rows = []
@@ -474,9 +474,18 @@ class TestGbtTrainer(unittest.TestCase):
 
         self.assertEqual(result.feature_keys, ["pressure_injection:step_1.setpoint_end"])
         self.assertEqual(len(result.control_families), 1)
-        self.assertEqual(result.control_families[0]["deployable"], False)
-        self.assertEqual(result.control_families[0]["deployability_reason"], "atomic_member_missing_trained_feature")
-        self.assertEqual(result.deployable_control_families, [])
+        self.assertEqual(result.control_families[0]["deployable"], True)
+        self.assertEqual(result.control_families[0]["family_type"], "partially_controllable")
+        self.assertEqual(result.control_families[0]["deployability_reason"], "partial_contiguous_subset")
+        self.assertEqual(
+            result.control_families[0]["family_constraints"]["controllable_member_parameter_ids"],
+            ["pressure_injection:step_1"],
+        )
+        self.assertEqual(len(result.deployable_control_families), 1)
+        self.assertEqual(
+            [member["parameter_id"] for member in result.deployable_control_families[0]["ordered_members"]],
+            ["pressure_injection:step_1"],
+        )
 
 
 @unittest.skipUnless(_PREDICTIVE_AVAILABLE, "lightgbm / scikit-learn not installed")

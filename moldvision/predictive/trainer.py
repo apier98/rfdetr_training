@@ -336,29 +336,50 @@ def _annotate_control_families(
             member_item["trained_control_feature_keys"] = trained_control_feature_keys
             members.append(member_item)
 
+        effective_family_type = family_type
+        deployable_members = list(members)
         if family_type == "atomic":
-            is_deployable = bool(members) and not dropped_member_parameter_ids and bool(trained_member_parameter_ids)
-            reason = "ok" if is_deployable else (
-                "atomic_member_missing_trained_feature"
-                if dropped_member_parameter_ids
-                else "no_trained_members"
-            )
+            partial_indices = [index for index, member in enumerate(members) if member.get("trained_control_feature_keys")]
+            if bool(members) and not dropped_member_parameter_ids and bool(trained_member_parameter_ids):
+                is_deployable = True
+                reason = "ok"
+            elif _is_contiguous_partial_subset(partial_indices, len(members)):
+                effective_family_type = "partially_controllable"
+                deployable_members = [members[index] for index in partial_indices]
+                is_deployable = True
+                reason = "partial_contiguous_subset"
+            else:
+                is_deployable = False
+                reason = (
+                    "atomic_member_missing_trained_feature"
+                    if dropped_member_parameter_ids
+                    else "no_trained_members"
+                )
         else:
+            deployable_members = [member for member in members if member.get("trained_control_feature_keys")]
             is_deployable = bool(trained_member_parameter_ids)
             reason = "ok" if is_deployable else "no_trained_members"
 
+        family_constraints = dict(family.get("family_constraints") or {})
+        if effective_family_type == "partially_controllable":
+            family_constraints["controllable_member_parameter_ids"] = list(trained_member_parameter_ids)
+            family_constraints["frozen_member_parameter_ids"] = list(dropped_member_parameter_ids)
+            family_constraints["partial_family_policy"] = "contiguous_subset"
+
         family_item = dict(family)
-        family_item["family_type"] = family_type
-        family_item["ordered_members"] = members
+        family_item["family_type"] = effective_family_type
+        family_item["ordered_members"] = deployable_members
+        family_item["all_ordered_members"] = members
         family_item["trained_member_parameter_ids"] = trained_member_parameter_ids
         family_item["dropped_member_parameter_ids"] = dropped_member_parameter_ids
+        family_item["family_constraints"] = family_constraints
         family_item["deployable"] = is_deployable
         family_item["deployability_reason"] = reason
         annotated.append(family_item)
         validation.append(
             {
                 "family_id": family_id,
-                "family_type": family_type,
+                "family_type": effective_family_type,
                 "deployable": is_deployable,
                 "reason": reason,
                 "trained_member_parameter_ids": list(trained_member_parameter_ids),
@@ -369,6 +390,21 @@ def _annotate_control_families(
             deployable.append(family_item)
 
     return annotated, deployable, validation
+
+
+def _is_contiguous_partial_subset(
+    trained_indices: Sequence[int],
+    total_members: int,
+) -> bool:
+    if total_members <= 1:
+        return bool(trained_indices)
+    if not trained_indices:
+        return False
+    ordered = sorted(set(int(index) for index in trained_indices))
+    if len(ordered) <= 0:
+        return False
+    expected = list(range(ordered[0], ordered[-1] + 1))
+    return ordered == expected
 
 
 def _effective_min_child_samples(configured: int, n_rows: int) -> int:
