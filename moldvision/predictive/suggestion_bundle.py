@@ -139,6 +139,7 @@ def write_suggestion_bundle(
             "model_type": target_result.model_type,
             "source_target": target_result.source_target,
             "signal_kind": target_result.signal_kind,
+            "signal_role": target_result.signal_role,
         }
 
     # Write training metadata.
@@ -147,6 +148,7 @@ def write_suggestion_bundle(
             "model_type": r.model_type,
             "source_target": r.source_target,
             "signal_kind": r.signal_kind,
+            "signal_role": r.signal_role,
             "metric": r.cv_metric_name,
             "mean": round(r.cv_metric_value, 6),
             "std": round(r.cv_metric_std, 6),

@@ -40,12 +40,12 @@ from .training_row_loader import (
 # Constants
 # ---------------------------------------------------------------------------
 
-SUGGESTION_TARGETS: Dict[str, Tuple[Literal["regression", "classification"], str, str]] = {
-    "quality_score":    ("regression", "y_quality_score", "quality_score"),
-    "defect_burn_mark": ("regression", "y_burden_burn_mark", "defect_burden"),
-    "defect_flash":     ("regression", "y_burden_flash", "defect_burden"),
-    "defect_sink_mark": ("regression", "y_burden_sink_mark", "defect_burden"),
-    "defect_weld_line": ("regression", "y_burden_weld_line", "defect_burden"),
+SUGGESTION_TARGETS: Dict[str, Tuple[Literal["regression", "classification"], str, str, str]] = {
+    "quality_score":    ("regression", "y_quality_score", "quality_score", "optimization"),
+    "defect_burn_mark": ("regression", "y_burden_burn_mark", "defect_burden", "optimization"),
+    "defect_flash":     ("regression", "y_burden_flash", "defect_burden", "optimization"),
+    "defect_sink_mark": ("regression", "y_burden_sink_mark", "defect_burden", "optimization"),
+    "defect_weld_line": ("regression", "y_burden_weld_line", "defect_burden", "optimization"),
 }
 
 
@@ -82,6 +82,7 @@ class TargetResult:
     model_type: Literal["regression", "classification"]
     source_target: str
     signal_kind: str
+    signal_role: str
     model: Any                      # fitted LightGBM model
     feature_keys: List[str]
     used_feature_keys: List[str]
@@ -568,7 +569,7 @@ def train_suggestion_models(
 
     target_results: Dict[str, TargetResult] = {}
 
-    for target_name, (model_type, jsonl_key, signal_kind) in SUGGESTION_TARGETS.items():
+    for target_name, (model_type, jsonl_key, signal_kind, signal_role) in SUGGESTION_TARGETS.items():
         raw_y = extract_targets(eligible, jsonl_key)
 
         # Filter rows where target is present.
@@ -647,6 +648,7 @@ def train_suggestion_models(
             model_type=model_type,
             source_target=jsonl_key,
             signal_kind=signal_kind,
+            signal_role=signal_role,
             model=model,
             feature_keys=feature_keys,
             used_feature_keys=used_feature_keys,
