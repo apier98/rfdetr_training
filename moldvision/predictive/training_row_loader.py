@@ -294,6 +294,9 @@ def extract_parameter_schema(
                     "step_mode": str(item.get("step_mode", "absolute")).strip() or "absolute",
                     "preferred_step": float(item.get("preferred_step", 1.0)),
                     "max_delta": float(item.get("max_delta", item.get("preferred_step", 1.0))),
+                    "observed_support_min": float(item.get("observed_support_min", item.get("baseline", 0.0))),
+                    "observed_support_max": float(item.get("observed_support_max", item.get("baseline", 0.0))),
+                    "support_margin_ratio": float(item.get("support_margin_ratio", 0.05)),
                     "decimal_places": item.get("decimal_places"),
                 }
                 merged[parameter_id] = entry
@@ -318,6 +321,18 @@ def extract_parameter_schema(
                 entry["unit"] = str(item.get("unit")).strip() or "setpoint"
             entry["range_min"] = min(float(entry["range_min"]), float(item.get("range_min", entry["range_min"])))
             entry["range_max"] = max(float(entry["range_max"]), float(item.get("range_max", entry["range_max"])))
+            entry["observed_support_min"] = min(
+                float(entry["observed_support_min"]),
+                float(item.get("observed_support_min", entry["observed_support_min"])),
+            )
+            entry["observed_support_max"] = max(
+                float(entry["observed_support_max"]),
+                float(item.get("observed_support_max", entry["observed_support_max"])),
+            )
+            entry["support_margin_ratio"] = min(
+                float(entry["support_margin_ratio"]),
+                float(item.get("support_margin_ratio", entry["support_margin_ratio"])),
+            )
             entry["preferred_step"] = min(
                 float(entry["preferred_step"]),
                 float(item.get("preferred_step", entry["preferred_step"])),

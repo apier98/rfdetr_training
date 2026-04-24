@@ -192,6 +192,7 @@ def write_suggestion_bundle(
         "min_app_version": min_app_version,
         "created_at":      datetime.now(timezone.utc).isoformat(),
         "feature_keys":    train_result.feature_keys,
+        "context_feature_keys": list(train_result.context_feature_keys),
         "trained_feature_keys": list(train_result.feature_keys),
         "parameter_schema": train_result.parameter_schema,
         "control_families": train_result.control_families,

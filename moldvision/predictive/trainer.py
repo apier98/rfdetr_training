@@ -96,6 +96,7 @@ class TargetResult:
 @dataclass
 class TrainResult:
     feature_keys: List[str]
+    context_feature_keys: List[str]
     imputation_values: Dict[str, float]  # fallback values for legacy/runtime compatibility
     parameter_schema: List[Dict[str, Any]]
     control_families: List[Dict[str, Any]]
@@ -249,6 +250,9 @@ def _selected_feature_keys(
 
     filtered: List[str] = []
     for key in feature_keys:
+        if str(key).startswith("defect_state."):
+            filtered.append(str(key))
+            continue
         _, dot, stat = str(key).partition(".")
         if not dot:
             filtered.append(str(key))
@@ -667,6 +671,7 @@ def train_suggestion_models(
 
     return TrainResult(
         feature_keys=feature_keys,
+        context_feature_keys=[key for key in feature_keys if str(key).startswith("defect_state.")],
         imputation_values=fill_values,
         parameter_schema=parameter_schema,
         control_families=control_families,
